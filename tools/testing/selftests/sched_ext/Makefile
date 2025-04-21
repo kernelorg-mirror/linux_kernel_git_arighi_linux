@@ -172,6 +172,7 @@ auto-test-targets :=			\
 	maximal				\
 	maybe_null			\
 	minimal				\
+	llc				\
 	numa				\
 	allowed_cpus			\
 	prog_run			\
