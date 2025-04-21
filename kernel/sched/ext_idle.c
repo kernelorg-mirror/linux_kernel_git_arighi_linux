@@ -988,6 +988,47 @@ __bpf_kfunc s32 scx_bpf_select_cpu_and(struct task_struct *p, s32 prev_cpu, u64 
 	return select_cpu_from_kfunc(p, prev_cpu, wake_flags, cpus_allowed, flags);
 }
 
+static const struct cpumask *get_cpumask_llc(s32 cpu)
+{
+#ifdef CONFIG_SMP
+	struct sched_domain *sd;
+
+	sd = rcu_dereference(per_cpu(sd_llc, cpu));
+	if (!sd)
+		return cpu_none_mask;
+
+	return sched_domain_span(sd);
+#else
+	return cpu_all_mask;
+#endif
+}
+
+/*
+ * scx_bpf_get_cpumask_llc - Return the LLC cpumask the given @cpu belongs
+ *			     to, or trigger an error if @cpu is invalid
+ * @cpu: target CPU
+ */
+__bpf_kfunc const struct cpumask *scx_bpf_get_cpumask_llc(s32 cpu)
+{
+	if (!kf_cpu_valid(cpu, NULL))
+		return cpu_none_mask;
+
+	rcu_read_lock();
+
+	return get_cpumask_llc(cpu);
+}
+
+/**
+ * scx_bpf_put_cpumask_llc - Release a previously acquired referenced LLC
+ *			     cpumask.
+ *
+ * @cpumask: &cpumask to release
+ */
+__bpf_kfunc void scx_bpf_put_cpumask_llc(const struct cpumask *cpumask)
+{
+	rcu_read_unlock();
+}
+
 /**
  * scx_bpf_get_idle_cpumask_node - Get a referenced kptr to the
  * idle-tracking per-CPU cpumask of a target NUMA node.
@@ -1261,6 +1302,8 @@ __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(scx_kfunc_ids_idle)
 BTF_ID_FLAGS(func, scx_bpf_cpu_node)
+BTF_ID_FLAGS(func, scx_bpf_get_cpumask_llc, KF_ACQUIRE)
+BTF_ID_FLAGS(func, scx_bpf_put_cpumask_llc, KF_RELEASE)
 BTF_ID_FLAGS(func, scx_bpf_get_idle_cpumask_node, KF_ACQUIRE)
 BTF_ID_FLAGS(func, scx_bpf_get_idle_cpumask, KF_ACQUIRE)
 BTF_ID_FLAGS(func, scx_bpf_get_idle_smtmask_node, KF_ACQUIRE)

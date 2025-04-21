@@ -78,6 +78,8 @@ int scx_bpf_cpu_node(s32 cpu) __ksym __weak;
 const struct cpumask *scx_bpf_get_possible_cpumask(void) __ksym __weak;
 const struct cpumask *scx_bpf_get_online_cpumask(void) __ksym __weak;
 void scx_bpf_put_cpumask(const struct cpumask *cpumask) __ksym __weak;
+const struct cpumask *scx_bpf_get_cpumask_llc(s32 cpu) __ksym __weak;
+void scx_bpf_put_cpumask_llc(const struct cpumask *cpumask) __ksym;
 const struct cpumask *scx_bpf_get_idle_cpumask_node(int node) __ksym __weak;
 const struct cpumask *scx_bpf_get_idle_cpumask(void) __ksym;
 const struct cpumask *scx_bpf_get_idle_smtmask_node(int node) __ksym __weak;
