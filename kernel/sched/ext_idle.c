@@ -547,6 +547,7 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 		if (!(current->flags & PF_EXITING) &&
 		    cpu_rq(cpu)->scx.local_dsq.nr == 0 &&
 		    (!(flags & SCX_PICK_IDLE_IN_NODE) || (waker_node == node)) &&
+		    (!(flags & SCX_PICK_IDLE_IN_LLC) || cpus_share_cache(cpu, prev_cpu)) &&
 		    !cpumask_empty(idle_cpumask(waker_node)->cpu)) {
 			if (cpumask_test_cpu(cpu, allowed))
 				goto out_unlock;
@@ -580,7 +581,7 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 		/*
 		 * Search for any fully idle core in the same NUMA node.
 		 */
-		if (numa_cpus) {
+		if (!(flags & SCX_PICK_IDLE_IN_LLC) && numa_cpus) {
 			cpu = pick_idle_cpu_in_node(numa_cpus, node, SCX_PICK_IDLE_CORE);
 			if (cpu >= 0)
 				goto out_unlock;
@@ -594,9 +595,11 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 		 * begin in prev_cpu's node and proceed to other nodes in
 		 * order of increasing distance.
 		 */
-		cpu = scx_pick_idle_cpu(allowed, node, flags | SCX_PICK_IDLE_CORE);
-		if (cpu >= 0)
-			goto out_unlock;
+		if  (!(flags & SCX_PICK_IDLE_IN_LLC)) {
+			cpu = scx_pick_idle_cpu(allowed, node, flags | SCX_PICK_IDLE_CORE);
+			if (cpu >= 0)
+				goto out_unlock;
+		}
 
 		/*
 		 * Give up if we're strictly looking for a full-idle SMT
@@ -628,7 +631,7 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 	/*
 	 * Search for any idle CPU in the same NUMA node.
 	 */
-	if (numa_cpus) {
+	if  (!(flags & SCX_PICK_IDLE_IN_LLC) && numa_cpus) {
 		cpu = pick_idle_cpu_in_node(numa_cpus, node, 0);
 		if (cpu >= 0)
 			goto out_unlock;
@@ -642,7 +645,8 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 	 * in prev_cpu's node and proceed to other nodes in order of
 	 * increasing distance.
 	 */
-	cpu = scx_pick_idle_cpu(allowed, node, flags);
+	if  (!(flags & SCX_PICK_IDLE_IN_LLC))
+		cpu = scx_pick_idle_cpu(allowed, node, flags);
 
 out_unlock:
 	rcu_read_unlock();

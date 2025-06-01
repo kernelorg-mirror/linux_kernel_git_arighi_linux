@@ -953,6 +953,7 @@ enum scx_deq_flags {
 enum scx_pick_idle_cpu_flags {
 	SCX_PICK_IDLE_CORE	= 1LLU << 0,	/* pick a CPU whose SMT siblings are also idle */
 	SCX_PICK_IDLE_IN_NODE	= 1LLU << 1,	/* pick a CPU in the same target NUMA node */
+	SCX_PICK_IDLE_IN_LLC	= 1LLU << 2,	/* pick a CPU in the same LLC */
 };
 
 enum scx_kick_flags {

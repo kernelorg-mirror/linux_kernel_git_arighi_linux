@@ -120,6 +120,7 @@ static inline bool __COMPAT_struct_has_field(const char *type, const char *field
 
 #define SCX_PICK_IDLE_CORE SCX_PICK_IDLE_FLAG(SCX_PICK_IDLE_CORE)
 #define SCX_PICK_IDLE_IN_NODE SCX_PICK_IDLE_FLAG(SCX_PICK_IDLE_IN_NODE)
+#define SCX_PICK_IDLE_IN_LLC SCX_PICK_IDLE_FLAG(SCX_PICK_IDLE_IN_LLC)
 
 static inline long scx_hotplug_seq(void)
 {
