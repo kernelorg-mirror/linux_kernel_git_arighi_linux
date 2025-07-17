@@ -1587,9 +1587,14 @@ void dl_server_start(struct sched_dl_entity *dl_se)
 	if (!dl_server(dl_se)) {
 		u64 runtime =  50 * NSEC_PER_MSEC;
 		u64 period = 1000 * NSEC_PER_MSEC;
+		int err;
 
-		if (WARN_ON_ONCE(dl_server_apply_params(dl_se, runtime, period, 1)))
+		err = dl_server_apply_params(dl_se, runtime, period, 1);
+		if (err == -EAGAIN)
 			return;
+
+		WARN_ON_ONCE(err);
+
 		dl_se->dl_server = 1;
 		dl_se->dl_defer = 1;
 		setup_new_dl_entity(dl_se);
@@ -1662,7 +1667,10 @@ int dl_server_apply_params(struct sched_dl_entity *dl_se, u64 runtime, u64 perio
 	 * root domain containing cpu_active() CPUs. So in this case, don't mess
 	 * with accounting and we can retry later.
 	 */
-	if (!cpus || __dl_overflow(dl_b, cap, old_bw, new_bw))
+	if (!cpus)
+		return -EAGAIN;
+
+	if (__dl_overflow(dl_b, cap, old_bw, new_bw))
 		return -EBUSY;
 
 	if (init) {
