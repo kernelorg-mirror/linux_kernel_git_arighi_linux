@@ -384,7 +384,8 @@ extern void dl_server_start(struct sched_dl_entity *dl_se);
 extern void dl_server_stop(struct sched_dl_entity *dl_se);
 extern void dl_server_init(struct sched_dl_entity *dl_se, struct rq *rq,
 		    dl_server_has_tasks_f has_tasks,
-		    dl_server_pick_f pick_task);
+		    dl_server_pick_f pick_task,
+		    dl_server_balance_f balance);
 extern void sched_init_dl_servers(void);
 
 extern void dl_server_update_idle_time(struct rq *rq,
@@ -401,6 +402,11 @@ extern int dl_server_remove_params(struct sched_dl_entity *dl_se);
 static inline bool dl_server_active(struct sched_dl_entity *dl_se)
 {
 	return dl_se->dl_server_active;
+}
+
+static inline bool is_dl_runnable(struct sched_dl_entity *dl_se)
+{
+	return dl_server_active(dl_se) && dl_se->dl_runtime && !dl_se->dl_throttled;
 }
 
 #ifdef CONFIG_CGROUP_SCHED
