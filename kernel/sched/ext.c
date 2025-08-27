@@ -1471,6 +1471,11 @@ enum scx_dsq_iter_flags {
 					  __SCX_DSQ_ITER_HAS_VTIME,
 };
 
+enum scx_dsq_move_flags {
+	/* Prioritize local tasks */
+	SCX_DSQ_MOVE_LOCAL		= 1U << 0,
+};
+
 struct bpf_iter_scx_dsq_kern {
 	struct scx_dsq_list_node	cursor;
 	struct scx_dispatch_q		*dsq;
@@ -2840,7 +2845,7 @@ static void scx_breather(struct rq *rq)
 }
 
 static bool consume_dispatch_q(struct scx_sched *sch, struct rq *rq,
-			       struct scx_dispatch_q *dsq)
+			       struct scx_dispatch_q *dsq, u64 flags)
 {
 	struct task_struct *p;
 retry:
@@ -2872,6 +2877,9 @@ retry:
 			return true;
 		}
 
+		if (flags & SCX_DSQ_MOVE_LOCAL)
+			continue;
+
 		if (task_can_run_on_remote_rq(sch, p, rq, false)) {
 			if (likely(consume_remote_task(rq, p, dsq, task_rq)))
 				return true;
@@ -2887,7 +2895,7 @@ static bool consume_global_dsq(struct scx_sched *sch, struct rq *rq)
 {
 	int node = cpu_to_node(cpu_of(rq));
 
-	return consume_dispatch_q(sch, rq, sch->global_dsqs[node]);
+	return consume_dispatch_q(sch, rq, sch->global_dsqs[node], 0);
 }
 
 /**
@@ -6703,21 +6711,7 @@ __bpf_kfunc void scx_bpf_dispatch_cancel(void)
 		scx_kf_error("dispatch buffer underflow");
 }
 
-/**
- * scx_bpf_dsq_move_to_local - move a task from a DSQ to the current CPU's local DSQ
- * @dsq_id: DSQ to move task from
- *
- * Move a task from the non-local DSQ identified by @dsq_id to the current CPU's
- * local DSQ for execution. Can only be called from ops.dispatch().
- *
- * This function flushes the in-flight dispatches from scx_bpf_dsq_insert()
- * before trying to move from the specified DSQ. It may also grab rq locks and
- * thus can't be called under any BPF locks.
- *
- * Returns %true if a task has been moved, %false if there isn't any task to
- * move.
- */
-__bpf_kfunc bool scx_bpf_dsq_move_to_local(u64 dsq_id)
+static bool dsq_move_to_local(u64 dsq_id, u64 flags)
 {
 	struct scx_sched *sch = scx_root;
 	struct scx_dsp_ctx *dspc = this_cpu_ptr(scx_dsp_ctx);
@@ -6734,7 +6728,7 @@ __bpf_kfunc bool scx_bpf_dsq_move_to_local(u64 dsq_id)
 		return false;
 	}
 
-	if (consume_dispatch_q(sch, dspc->rq, dsq)) {
+	if (consume_dispatch_q(sch, dspc->rq, dsq, flags)) {
 		/*
 		 * A successfully consumed task can be dequeued before it starts
 		 * running while the CPU is trying to migrate other dispatched
@@ -6746,6 +6740,36 @@ __bpf_kfunc bool scx_bpf_dsq_move_to_local(u64 dsq_id)
 	} else {
 		return false;
 	}
+}
+
+/**
+ * scx_bpf_dsq_move_to_local - move a task from a DSQ to the current CPU's local DSQ
+ * @dsq_id: DSQ to move task from
+ *
+ * Move a task from the non-local DSQ identified by @dsq_id to the current CPU's
+ * local DSQ for execution. Can only be called from ops.dispatch().
+ *
+ * This function flushes the in-flight dispatches from scx_bpf_dsq_insert()
+ * before trying to move from the specified DSQ. It may also grab rq locks and
+ * thus can't be called under any BPF locks.
+ *
+ * Returns %true if a task has been moved, %false if there isn't any task to
+ * move.
+ */
+__bpf_kfunc bool scx_bpf_dsq_move_to_local(u64 dsq_id)
+{
+	return dsq_move_to_local(dsq_id, 0);
+}
+
+/*
+ * scx_bpf_dsq_move_to_local_flags - move a task from a DSQ to the current
+ *                                   CPU's local DSQ
+ * @dsq_id: DSQ to move task from
+ * @flags: DSQ move flags
+ */
+__bpf_kfunc bool scx_bpf_dsq_move_to_local_flags(u64 dsq_id, u64 flags)
+{
+	return dsq_move_to_local(dsq_id, flags);
 }
 
 /**
@@ -6848,6 +6872,7 @@ BTF_KFUNCS_START(scx_kfunc_ids_dispatch)
 BTF_ID_FLAGS(func, scx_bpf_dispatch_nr_slots)
 BTF_ID_FLAGS(func, scx_bpf_dispatch_cancel)
 BTF_ID_FLAGS(func, scx_bpf_dsq_move_to_local)
+BTF_ID_FLAGS(func, scx_bpf_dsq_move_to_local_flags)
 BTF_ID_FLAGS(func, scx_bpf_dsq_move_set_slice)
 BTF_ID_FLAGS(func, scx_bpf_dsq_move_set_vtime)
 BTF_ID_FLAGS(func, scx_bpf_dsq_move, KF_RCU)
