@@ -629,6 +629,18 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 		goto out_unlock;
 	}
 
+	if (sched_smt_active()) {
+		/*
+		 * If we couldn't find any full-idle SMT core, check if the
+		 * other sibling in the same SMT core is idle before
+		 * jumping to another partially-idle SMT core.
+		 */
+		for_each_cpu(cpu, cpu_smt_mask(prev_cpu))
+			if (cpu != prev_cpu && cpumask_test_cpu(cpu, allowed) &&
+			    scx_idle_test_and_clear_cpu(cpu))
+				goto out_unlock;
+	}
+
 	/*
 	 * Search for any idle CPU in the same LLC domain.
 	 */
