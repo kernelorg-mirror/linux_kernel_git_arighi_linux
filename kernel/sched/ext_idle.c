@@ -455,7 +455,7 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 	const struct cpumask *allowed = cpus_allowed ?: p->cpus_ptr;
 	int node = scx_cpu_node_if_enabled(prev_cpu);
 	bool is_prev_allowed;
-	s32 cpu;
+	s32 cpu = smp_processor_id();
 
 	preempt_disable();
 
@@ -514,6 +514,20 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 	}
 
 	/*
+	 * Allow a per-cpu kthread to stack with the wakee if the kworker
+	 * thread and the tasks previous CPUs are the same. The assumption
+	 * is that the wakee queued work for the per-cpu kthread that is
+	 * now complete and the wakeup is essentially a sync wakeup. An
+	 * obvious example of this pattern is IO completions.
+	 */
+	if (wake_flags & SCX_WAKE_TTWU) {
+		if (is_prev_allowed && prev_cpu == cpu &&
+		    is_per_cpu_kthread(current) && in_task() &&
+		    cpu_rq(cpu)->scx.local_dsq.nr == 0)
+			goto out_unlock;
+	}
+
+	/*
 	 * If WAKE_SYNC, try to migrate the wakee to the waker's CPU.
 	 */
 	if (wake_flags & SCX_WAKE_SYNC) {
@@ -523,7 +537,6 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 		 * If the waker's CPU is cache affine and prev_cpu is idle,
 		 * then avoid a migration.
 		 */
-		cpu = smp_processor_id();
 		if (is_prev_allowed && cpus_share_cache(cpu, prev_cpu) &&
 		    scx_idle_test_and_clear_cpu(prev_cpu)) {
 			cpu = prev_cpu;
