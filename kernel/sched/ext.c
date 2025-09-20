@@ -899,6 +899,19 @@ static void refill_task_slice_dfl(struct scx_sched *sch, struct task_struct *p)
 	__scx_add_event(sch, SCX_EV_REFILL_SLICE_DFL, 1);
 }
 
+static void update_first_task(struct scx_dispatch_q *dsq)
+{
+	struct task_struct *p;
+
+	if (dsq->id & SCX_DSQ_FLAG_BUILTIN)
+		return;
+
+	lockdep_assert_held(&dsq->lock);
+
+	p = nldsq_next_task(dsq, NULL, false);
+	rcu_assign_pointer(dsq->first_task, p);
+}
+
 static void dispatch_enqueue(struct scx_sched *sch, struct scx_dispatch_q *dsq,
 			     struct task_struct *p, u64 enq_flags)
 {
@@ -961,6 +974,7 @@ static void dispatch_enqueue(struct scx_sched *sch, struct scx_dispatch_q *dsq,
 		} else {
 			list_add(&p->scx.dsq_list.node, &dsq->list);
 		}
+		update_first_task(dsq);
 	} else {
 		/* a FIFO DSQ shouldn't be using PRIQ enqueuing */
 		if (unlikely(!RB_EMPTY_ROOT(&dsq->priq)))
@@ -1027,6 +1041,8 @@ static void task_unlink_from_dsq(struct task_struct *p,
 
 	list_del_init(&p->scx.dsq_list.node);
 	dsq_mod_nr(dsq, -1);
+
+	update_first_task(dsq);
 }
 
 static void dispatch_dequeue(struct rq *rq, struct task_struct *p)
@@ -5762,6 +5778,31 @@ __bpf_kfunc bool scx_bpf_dsq_move_to_local(u64 dsq_id)
 	}
 }
 
+/*
+ * Return the first task in a priority DSQ in a lockless way.
+ */
+__bpf_kfunc struct task_struct *scx_bpf_dsq_peek(u64 dsq_id)
+{
+	struct scx_sched *sch = rcu_dereference(scx_root);
+	struct scx_dispatch_q *dsq;
+
+	if (!scx_kf_allowed(sch, SCX_KF_DISPATCH))
+		return NULL;
+
+	if (unlikely((dsq_id & SCX_DSQ_FLAG_BUILTIN))) {
+		scx_error(sch, "invalid DSQ ID 0x%016llx (only user DSQs allowed)", dsq_id);
+		return NULL;
+	}
+
+	dsq = find_user_dsq(sch, dsq_id);
+	if (unlikely(!dsq)) {
+		scx_error(sch, "non-existent DSQ ID 0x%016llx", dsq_id);
+		return NULL;
+	}
+
+	return rcu_dereference(dsq->first_task);
+}
+
 /**
  * scx_bpf_dsq_move_set_slice - Override slice when moving between DSQs
  * @it__iter: DSQ iterator in progress
@@ -5862,6 +5903,7 @@ BTF_KFUNCS_START(scx_kfunc_ids_dispatch)
 BTF_ID_FLAGS(func, scx_bpf_dispatch_nr_slots)
 BTF_ID_FLAGS(func, scx_bpf_dispatch_cancel)
 BTF_ID_FLAGS(func, scx_bpf_dsq_move_to_local)
+BTF_ID_FLAGS(func, scx_bpf_dsq_peek, KF_RCU_PROTECTED | KF_RET_NULL)
 BTF_ID_FLAGS(func, scx_bpf_dsq_move_set_slice)
 BTF_ID_FLAGS(func, scx_bpf_dsq_move_set_vtime)
 BTF_ID_FLAGS(func, scx_bpf_dsq_move, KF_RCU)
