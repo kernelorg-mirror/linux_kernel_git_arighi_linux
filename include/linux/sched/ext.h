@@ -63,6 +63,7 @@ struct scx_dispatch_q {
 	u32			nr;
 	u32			seq;	/* used by BPF iter */
 	u64			id;
+	struct task_struct	*first_task;
 	struct rhash_head	hash_node;
 	struct llist_node	free_node;
 	struct rcu_head		rcu;
