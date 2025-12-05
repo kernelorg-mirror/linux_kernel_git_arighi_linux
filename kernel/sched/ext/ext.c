@@ -2396,6 +2396,19 @@ static bool task_can_run_on_remote_rq(struct scx_sched *sch,
 		return false;
 
 	/*
+	 * A blocked donor may be moved normally to select a new callback rq.
+	 * set_task_cpu() updates wake_cpu and makes the destination rq its new
+	 * callback home, even if the donor was previously proxy-migrated.
+	 *
+	 * Don't move an active donor while the source rq still references it for
+	 * scheduling and accounting. The migration can be retried after the donor
+	 * is switched out.
+	 */
+	if (p->is_blocked &&
+	    rcu_access_pointer(task_rq(p)->donor) == p)
+		return false;
+
+	/*
 	 * If @p has migration disabled, @p->cpus_ptr is updated to contain only
 	 * the pinned CPU in migrate_disable_switch() while @p is being switched
 	 * out. However, put_prev_task_scx() is called before @p->cpus_ptr is
@@ -3080,6 +3093,22 @@ static void put_prev_task_scx(struct rq *rq, struct task_struct *p,
 
 	if (p->scx.flags & SCX_TASK_QUEUED) {
 		set_task_runnable(rq, p);
+
+		/*
+		 * Mutex-blocked donors stay queued on the runqueue under proxy
+		 * execution, but the donor never runs as itself, proxy-exec
+		 * walks the blocked_on chain on the next __schedule() and runs
+		 * the lock owner in its place.
+		 *
+		 * Put the donor on the local DSQ directly so pick_next_task()
+		 * can still see it. find_proxy_task() will either run the chain
+		 * owner or deactivate the donor so the wakeup path can return it
+		 * and let BPF make a new dispatch decision once it is unblocked.
+		 */
+		if (p->is_blocked) {
+			scx_dispatch_enqueue(sch, rq, &rq->scx.local_dsq, p, 0);
+			goto switch_class;
+		}
 
 		/*
 		 * If @p has slice left and is being put, @p is getting
