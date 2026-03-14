@@ -1889,6 +1889,7 @@ static bool consume_dispatch_q(struct scx_sched *sch, struct rq *rq,
 			       struct scx_dispatch_q *dsq)
 {
 	struct task_struct *p;
+	s32 cpu = cpu_of(rq);
 retry:
 	/*
 	 * The caller can't expect to successfully consume a task if the task's
@@ -1898,7 +1899,19 @@ retry:
 	if (list_empty(&dsq->list))
 		return false;
 
-	raw_spin_lock(&dsq->lock);
+	/*
+	 * Use trylock to avoid spinning on a contended DSQ, if we fail to
+	 * acquire the lock kick the CPU to retry on the next balance.
+	 *
+	 * In bypass mode simply spin to acquire the lock, since
+	 * scx_kick_cpu() is suppressed.
+	 */
+	if (scx_rq_bypassing(rq)) {
+		raw_spin_lock(&dsq->lock);
+	} else if (!raw_spin_trylock(&dsq->lock)) {
+		scx_kick_cpu(sch, cpu, 0);
+		return false;
+	}
 
 	nldsq_for_each_task(p, dsq) {
 		struct rq *task_rq = task_rq(p);
@@ -6083,8 +6096,8 @@ __bpf_kfunc void scx_bpf_dispatch_cancel(void)
  * before trying to move from the specified DSQ. It may also grab rq locks and
  * thus can't be called under any BPF locks.
  *
- * Returns %true if a task has been moved, %false if there isn't any task to
- * move.
+ * Returns %true if a task has been moved, %false if no eligible task could
+ * be consumed from @dsq_id.
  */
 __bpf_kfunc bool scx_bpf_dsq_move_to_local(u64 dsq_id)
 {
