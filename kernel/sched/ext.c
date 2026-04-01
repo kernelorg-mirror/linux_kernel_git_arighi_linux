@@ -1008,6 +1008,12 @@ static void local_dsq_post_enq(struct scx_dispatch_q *dsq, struct task_struct *p
 		resched_curr(rq);
 }
 
+static inline void scx_ddsp_reset(struct task_struct *p)
+{
+	p->scx.ddsp_dsq_id = SCX_DSQ_INVALID;
+	p->scx.ddsp_enq_flags = 0;
+}
+
 static void dispatch_enqueue(struct scx_sched *sch, struct scx_dispatch_q *dsq,
 			     struct task_struct *p, u64 enq_flags)
 {
@@ -1109,8 +1115,7 @@ static void dispatch_enqueue(struct scx_sched *sch, struct scx_dispatch_q *dsq,
 	 * dispatch verdict may be overridden on the enqueue path during e.g.
 	 * bypass.
 	 */
-	p->scx.ddsp_dsq_id = SCX_DSQ_INVALID;
-	p->scx.ddsp_enq_flags = 0;
+	scx_ddsp_reset(p);
 
 	/*
 	 * We're transitioning out of QUEUEING or DISPATCHING. store_release to
@@ -1157,19 +1162,27 @@ static void dispatch_dequeue(struct rq *rq, struct task_struct *p)
 	if (!dsq) {
 		/*
 		 * If !dsq && on-list, @p is on @rq's ddsp_deferred_locals.
-		 * Unlinking is all that's needed to cancel.
+		 * Unlink and clear the deferred dispatch state.
 		 */
-		if (unlikely(!list_empty(&p->scx.dsq_list.node)))
+		if (unlikely(!list_empty(&p->scx.dsq_list.node))) {
 			list_del_init(&p->scx.dsq_list.node);
+			scx_ddsp_reset(p);
+		}
 
 		/*
 		 * When dispatching directly from the BPF scheduler to a local
 		 * DSQ, the task isn't associated with any DSQ but
 		 * @p->scx.holding_cpu may be set under the protection of
-		 * %SCX_OPSS_DISPATCHING.
+		 * %SCX_OPSS_DISPATCHING. If we win the race and clear
+		 * holding_cpu before dispatch_to_local_dsq() completes, the
+		 * in-flight dispatch is cancelled and dispatch_enqueue() won't
+		 * be called, so clear the stale direct dispatch state here so
+		 * the next wakeup starts clean.
 		 */
-		if (p->scx.holding_cpu >= 0)
+		if (p->scx.holding_cpu >= 0) {
 			p->scx.holding_cpu = -1;
+			scx_ddsp_reset(p);
+		}
 
 		return;
 	}
@@ -2907,6 +2920,8 @@ static void scx_enable_task(struct task_struct *p)
 		weight = sched_prio_to_weight[p->static_prio - MAX_RT_PRIO];
 
 	p->scx.weight = sched_weight_to_cgroup(weight);
+
+	scx_ddsp_reset(p);
 
 	if (SCX_HAS_OP(sch, enable))
 		SCX_CALL_OP_TASK(sch, SCX_KF_REST, enable, rq, p);
