@@ -7925,7 +7925,7 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool 
 	struct cpumask *cpus = this_cpu_cpumask_var_ptr(select_rq_mask);
 	int i, cpu, idle_cpu = -1, nr = INT_MAX;
 
-	if (sched_feat(SIS_UTIL)) {
+	if (sched_feat(SIS_UTIL) && sd->shared) {
 		/*
 		 * Increment because !--nr is the condition to stop scan.
 		 *
@@ -12840,7 +12840,8 @@ static void set_cpu_sd_state_busy(int cpu)
 		goto unlock;
 	sd->nohz_idle = 0;
 
-	atomic_inc(&sd->shared->nr_busy_cpus);
+	if (sd->shared)
+		atomic_inc(&sd->shared->nr_busy_cpus);
 unlock:
 	rcu_read_unlock();
 }
@@ -12869,7 +12870,8 @@ static void set_cpu_sd_state_idle(int cpu)
 		goto unlock;
 	sd->nohz_idle = 1;
 
-	atomic_dec(&sd->shared->nr_busy_cpus);
+	if (sd->shared)
+		atomic_dec(&sd->shared->nr_busy_cpus);
 unlock:
 	rcu_read_unlock();
 }
