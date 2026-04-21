@@ -8002,6 +8002,7 @@ select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target)
 	int fits, best_fits = 0;
 	int cpu, best_cpu = -1;
 	struct cpumask *cpus;
+	int nr = INT_MAX;
 
 	cpus = this_cpu_cpumask_var_ptr(select_rq_mask);
 	cpumask_and(cpus, sched_domain_span(sd), p->cpus_ptr);
@@ -8010,9 +8011,29 @@ select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target)
 	util_min = uclamp_eff_value(p, UCLAMP_MIN);
 	util_max = uclamp_eff_value(p, UCLAMP_MAX);
 
+	if (sched_feat(SIS_UTIL) && sd->shared) {
+		/*
+		 * Increment because !--nr is the condition to stop scan.
+		 *
+		 * Since "sd" is "sd_llc" for target CPU dereferenced in the
+		 * caller, it is safe to directly dereference "sd->shared".
+		 * Topology bits always ensure it assigned for "sd_llc" and it
+		 * cannot disappear as long as we have a RCU protected
+		 * reference to one the associated "sd" here.
+		 */
+		nr = READ_ONCE(sd->shared->nr_idle_scan) + 1;
+		/* overloaded LLC is unlikely to have idle cpu/core */
+		if (nr == 1)
+			return -1;
+	}
+
 	for_each_cpu_wrap(cpu, cpus, target) {
 		bool preferred_core = !prefers_idle_core || is_core_idle(cpu);
 		unsigned long cpu_cap = capacity_of(cpu);
+
+		/* We have found a good enough target. Just use it. */
+		if (--nr <= 0 && best_fits == -4)
+			return best_cpu;
 
 		if (!choose_idle_cpu(cpu, p))
 			continue;
