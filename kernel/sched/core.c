@@ -7195,7 +7195,7 @@ pick_again:
 			 * sched_ext tracks curr/donor itself; re-entering set_next_task_scx
 			 * here dispatches through a stale/NULL BPF ops vtable.
 			 */
-			if (donor->sched_class != &ext_sched_class) {
+			if (!is_ext_class(donor)) {
 				donor->sched_class->put_prev_task(rq, donor, donor);
 				donor->sched_class->set_next_task(rq, donor, true);
 			}

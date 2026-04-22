@@ -102,6 +102,8 @@ enum scx_ent_flags {
 	SCX_TASK_SUB_INIT	= 1 << 4, /* task being initialized for a sub sched */
 	SCX_TASK_IMMED		= 1 << 5, /* task is on local DSQ with %SCX_ENQ_IMMED */
 
+	SCX_TASK_IS_RUNNING	= 1 << 6, /* ops.running() has been called */
+
 	/*
 	 * Bits 8 to 10 are used to carry task state:
 	 *
