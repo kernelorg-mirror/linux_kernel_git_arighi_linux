@@ -6793,9 +6793,13 @@ static void proxy_force_return(struct rq *rq, struct rq_flags *rf,
 
 		update_rq_clock(task_rq);
 		deactivate_task(task_rq, p, DEQUEUE_NOCLOCK);
-		cpu = select_task_rq(p, p->wake_cpu, &wake_flag);
-		set_task_cpu(p, cpu);
-		target_rq = cpu_rq(cpu);
+		if (p->nr_cpus_allowed > 1 && !is_migration_disabled(p)) {
+			cpu = select_task_rq(p, p->wake_cpu, &wake_flag);
+			set_task_cpu(p, cpu);
+			target_rq = cpu_rq(cpu);
+		} else {
+			target_rq = task_rq;
+		}
 		clear_task_blocked_on(p, NULL);
 	}
 
@@ -6893,6 +6897,18 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			 */
 			if (curr_in_chain)
 				return proxy_resched_idle(rq);
+			/*
+			 * Migration-disabled tasks cannot be moved to
+			 * @owner_cpu. proxy_migrate_task() uses
+			 * __set_task_cpu() which would silently violate
+			 * the pinning and leave the task to run on a CPU
+			 * outside its cpus_ptr once it is unblocked. Stay
+			 * on this CPU via force_return; the owner running
+			 * elsewhere will wake @p back up when the mutex
+			 * becomes available.
+			 */
+			if (is_migration_disabled(p))
+				goto force_return;
 			goto migrate_task;
 		}
 
