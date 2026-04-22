@@ -201,6 +201,13 @@ struct sched_ext_entity {
 	s32			holding_cpu;
 	s32			selected_cpu;
 	struct task_struct	*kf_tasks[2];	/* see SCX_CALL_OP_TASK() */
+	/*
+	 * Nesting depth of SCX_CALL_OP_TASK() on this task as %current (e.g.
+	 * during schedule() %current is still the previous task). Used to skip
+	 * ops.runnable() when invoked from inside another task op such as
+	 * ops.running() to avoid breaking BPF re-entrance guarantees.
+	 */
+	u32			kf_nest;
 
 	struct list_head	runnable_node;	/* rq->scx.runnable_list */
 	unsigned long		runnable_at;

@@ -1623,11 +1623,13 @@ do {										\
 	struct task_struct *__scx_kf0_sv = current->scx.kf_tasks[0];		\
 	struct task_struct *__scx_kf1_sv = current->scx.kf_tasks[1];		\
 										\
+	current->scx.kf_nest++;							\
 	current->scx.kf_tasks[0] = task;					\
 	current->scx.kf_tasks[1] = NULL;					\
 	SCX_CALL_OP((sch), op, locked_rq, task, ##args);			\
 	current->scx.kf_tasks[0] = __scx_kf0_sv;				\
 	current->scx.kf_tasks[1] = __scx_kf1_sv;				\
+	current->scx.kf_nest--;							\
 } while (0)
 
 #define SCX_CALL_OP_TASK_RET(sch, op, locked_rq, task, args...)			\
@@ -1636,11 +1638,13 @@ do {										\
 	struct task_struct *__scx_kf0_sv = current->scx.kf_tasks[0];		\
 	struct task_struct *__scx_kf1_sv = current->scx.kf_tasks[1];		\
 										\
+	current->scx.kf_nest++;							\
 	current->scx.kf_tasks[0] = task;					\
 	current->scx.kf_tasks[1] = NULL;					\
 	__ret = SCX_CALL_OP_RET((sch), op, locked_rq, task, ##args);		\
 	current->scx.kf_tasks[0] = __scx_kf0_sv;				\
 	current->scx.kf_tasks[1] = __scx_kf1_sv;				\
+	current->scx.kf_nest--;							\
 	__ret;									\
 })
 
@@ -1650,11 +1654,13 @@ do {										\
 	struct task_struct *__scx_kf0_sv = current->scx.kf_tasks[0];		\
 	struct task_struct *__scx_kf1_sv = current->scx.kf_tasks[1];		\
 										\
+	current->scx.kf_nest++;							\
 	current->scx.kf_tasks[0] = task0;					\
 	current->scx.kf_tasks[1] = task1;					\
 	__ret = SCX_CALL_OP_RET((sch), op, locked_rq, task0, task1, ##args);	\
 	current->scx.kf_tasks[0] = __scx_kf0_sv;				\
 	current->scx.kf_tasks[1] = __scx_kf1_sv;				\
+	current->scx.kf_nest--;							\
 	__ret;									\
 })
 
