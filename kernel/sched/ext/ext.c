@@ -2414,20 +2414,49 @@ static bool unlink_dsq_and_lock_src_rq(struct task_struct *p,
 		!WARN_ON_ONCE(src_rq != task_rq(p));
 }
 
-static bool consume_remote_task(struct rq *this_rq,
+static bool consume_remote_task(struct scx_sched *sch, struct rq *this_rq,
 				struct task_struct *p, u64 enq_flags,
 				struct scx_dispatch_q *dsq, struct rq *src_rq)
 {
+	struct rq *tracked_rq = scx_locked_rq();
+	bool consumed = false;
+
+	/*
+	 * consume_remote_task() may be called from an SCX op with @this_rq
+	 * recorded as the currently locked rq. Clear the tracking while the rq
+	 * lock is dropped so nested callbacks don't save and later try to restore
+	 * an rq which isn't locked anymore.
+	 */
+	if (tracked_rq) {
+		WARN_ON_ONCE(tracked_rq != this_rq);
+		update_locked_rq(NULL);
+	}
 	raw_spin_rq_unlock(this_rq);
 
 	if (unlink_dsq_and_lock_src_rq(p, dsq, src_rq)) {
+		if (unlikely(!task_can_run_on_remote_rq(sch, p, this_rq, true))) {
+			p->scx.dsq = NULL;
+			p->scx.holding_cpu = -1;
+			dispatch_enqueue(sch, src_rq, &src_rq->scx.local_dsq, p,
+					 enq_flags | SCX_ENQ_CLEAR_OPSS);
+			if (sched_class_above(p->sched_class, src_rq->donor->sched_class))
+				resched_curr(src_rq);
+			raw_spin_rq_unlock(src_rq);
+			goto relock;
+		}
 		move_remote_task_to_local_dsq(p, enq_flags, src_rq, this_rq);
-		return true;
-	} else {
-		raw_spin_rq_unlock(src_rq);
-		raw_spin_rq_lock(this_rq);
-		return false;
+		consumed = true;
+		goto restore;
 	}
+	raw_spin_rq_unlock(src_rq);
+
+relock:
+	raw_spin_rq_lock(this_rq);
+restore:
+	if (tracked_rq)
+		update_locked_rq(tracked_rq);
+
+	return consumed;
 }
 
 /**
@@ -2537,7 +2566,7 @@ retry:
 		}
 
 		if (task_can_run_on_remote_rq(sch, p, rq, false)) {
-			if (likely(consume_remote_task(rq, p, enq_flags, dsq, task_rq)))
+			if (likely(consume_remote_task(sch, rq, p, enq_flags, dsq, task_rq)))
 				return true;
 			goto retry;
 		}
