@@ -7111,7 +7111,7 @@ static void __sched notrace __schedule(int sched_mode)
 		 * task_is_blocked() will always be false).
 		 */
 		try_to_block_task(rq, prev, &prev_state,
-				  !task_is_blocked(prev));
+				  !task_is_blocked(prev) || scx_enabled());
 		switch_count = &prev->nvcsw;
 	}
 
@@ -7123,6 +7123,12 @@ pick_again:
 		struct task_struct *prev_donor = rq->donor;
 
 		rq_set_donor(rq, next);
+		if (scx_enabled()) {
+			if (unlikely(next->blocked_on))
+				clear_task_blocked_on(next, PROXY_WAKING);
+			goto picked;
+		}
+
 		if (unlikely(next->blocked_on)) {
 			next = find_proxy_task(rq, next, &rf);
 			if (!next) {
