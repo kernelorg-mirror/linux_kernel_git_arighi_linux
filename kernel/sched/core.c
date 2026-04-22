@@ -6942,6 +6942,20 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			 */
 			if (curr_in_chain)
 				return proxy_resched_idle(rq);
+			/*
+			 * Tasks pinned to a single CPU (per-CPU kthreads via
+			 * kthread_bind(), tasks under migrate_disable()) cannot
+			 * be moved to @owner_cpu. proxy_migrate_task() uses
+			 * __set_task_cpu() which would silently violate the
+			 * pinning and leave the task to run on a CPU outside
+			 * its cpus_ptr once it is unblocked. Deactivate it on
+			 * this CPU; the owner running elsewhere will wake @p
+			 * back up when the mutex becomes available.
+			 */
+			if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
+				__clear_task_blocked_on(p, NULL);
+				goto deactivate;
+			}
 			goto migrate_task;
 		}
 
