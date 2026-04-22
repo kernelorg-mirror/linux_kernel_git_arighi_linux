@@ -1611,37 +1611,50 @@ do {										\
  * pi_lock held by try_to_wake_up() with rq tracking via scx_rq.in_select_cpu.
  * So if kf_tasks[] is set, @p's scheduler-protected fields are stable.
  *
- * kf_tasks[] can not stack, so task-based SCX ops must not nest. The
- * WARN_ON_ONCE() in each macro catches a re-entry of any of the three variants
- * while a previous one is still in progress.
+ * Task-based SCX ops may nest (e.g. ops.running() calling a kfunc that ends up
+ * in enqueue_task_scx() -> ops.runnable()). Save and restore kf_tasks[] around
+ * each invocation so the outer op's context is restored for kfuncs and for
+ * further nested calls. Single-task ops save/restore both slots and clear
+ * kf_tasks[1] while active so a nested call under SCX_CALL_OP_2TASKS_RET does
+ * not leave the outer pair's second task authenticated for kfuncs.
  */
 #define SCX_CALL_OP_TASK(sch, op, locked_rq, task, args...)			\
 do {										\
-	WARN_ON_ONCE(current->scx.kf_tasks[0]);					\
+	struct task_struct *__scx_kf0_sv = current->scx.kf_tasks[0];		\
+	struct task_struct *__scx_kf1_sv = current->scx.kf_tasks[1];		\
+										\
 	current->scx.kf_tasks[0] = task;					\
+	current->scx.kf_tasks[1] = NULL;					\
 	SCX_CALL_OP((sch), op, locked_rq, task, ##args);			\
-	current->scx.kf_tasks[0] = NULL;					\
+	current->scx.kf_tasks[0] = __scx_kf0_sv;				\
+	current->scx.kf_tasks[1] = __scx_kf1_sv;				\
 } while (0)
 
 #define SCX_CALL_OP_TASK_RET(sch, op, locked_rq, task, args...)			\
 ({										\
 	__typeof__((sch)->ops.op(task, ##args)) __ret;				\
-	WARN_ON_ONCE(current->scx.kf_tasks[0]);					\
+	struct task_struct *__scx_kf0_sv = current->scx.kf_tasks[0];		\
+	struct task_struct *__scx_kf1_sv = current->scx.kf_tasks[1];		\
+										\
 	current->scx.kf_tasks[0] = task;					\
+	current->scx.kf_tasks[1] = NULL;					\
 	__ret = SCX_CALL_OP_RET((sch), op, locked_rq, task, ##args);		\
-	current->scx.kf_tasks[0] = NULL;					\
+	current->scx.kf_tasks[0] = __scx_kf0_sv;				\
+	current->scx.kf_tasks[1] = __scx_kf1_sv;				\
 	__ret;									\
 })
 
 #define SCX_CALL_OP_2TASKS_RET(sch, op, locked_rq, task0, task1, args...)	\
 ({										\
 	__typeof__((sch)->ops.op(task0, task1, ##args)) __ret;			\
-	WARN_ON_ONCE(current->scx.kf_tasks[0]);					\
+	struct task_struct *__scx_kf0_sv = current->scx.kf_tasks[0];		\
+	struct task_struct *__scx_kf1_sv = current->scx.kf_tasks[1];		\
+										\
 	current->scx.kf_tasks[0] = task0;					\
 	current->scx.kf_tasks[1] = task1;					\
 	__ret = SCX_CALL_OP_RET((sch), op, locked_rq, task0, task1, ##args);	\
-	current->scx.kf_tasks[0] = NULL;					\
-	current->scx.kf_tasks[1] = NULL;					\
+	current->scx.kf_tasks[0] = __scx_kf0_sv;				\
+	current->scx.kf_tasks[1] = __scx_kf1_sv;				\
 	__ret;									\
 })
 

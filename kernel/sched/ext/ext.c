@@ -500,8 +500,12 @@ static inline void scx_call_op_set_cpumask(struct scx_sched *sch, struct rq *rq,
 					   struct task_struct *task,
 					   const struct cpumask *cpumask)
 {
-	WARN_ON_ONCE(current->scx.kf_tasks[0]);
+	struct task_struct *__scx_kf0_sv = current->scx.kf_tasks[0];
+	struct task_struct *__scx_kf1_sv = current->scx.kf_tasks[1];
+
+	current->scx.kf_nest++;
 	current->scx.kf_tasks[0] = task;
+	current->scx.kf_tasks[1] = NULL;
 	if (rq)
 		update_locked_rq(rq);
 
@@ -520,7 +524,9 @@ static inline void scx_call_op_set_cpumask(struct scx_sched *sch, struct rq *rq,
 
 	if (rq)
 		update_locked_rq(NULL);
-	current->scx.kf_tasks[0] = NULL;
+	current->scx.kf_tasks[0] = __scx_kf0_sv;
+	current->scx.kf_tasks[1] = __scx_kf1_sv;
+	current->scx.kf_nest--;
 }
 
 enum scx_dsq_iter_flags {
