@@ -7990,6 +7990,22 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool 
 }
 
 /*
+ * Idle-capacity scan ranks transformed util_fits_cpu() outcomes; lower values
+ * are more preferred (see select_idle_capacity()).
+ */
+enum asym_fits_state {
+	/* In descending order of preference */
+	ASYM_IDLE_CORE_UCLAMP_MISFIT = -4,
+	ASYM_IDLE_CORE_COMPLETE_MISFIT,
+	ASYM_IDLE_THREAD_FITS,
+	ASYM_IDLE_THREAD_UCLAMP_MISFIT,
+	ASYM_IDLE_COMPLETE_MISFIT,
+
+	/* asym_fits_cpu() bias for an idle core. */
+	ASYM_IDLE_CORE_BIAS = -3,
+};
+
+/*
  * Scan the asym_capacity domain for idle CPUs; pick the first idle one on which
  * the task fits. If no CPU is big enough, but there are idle ones, try to
  * maximize capacity.
@@ -7999,7 +8015,7 @@ select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target)
 {
 	bool prefers_idle_core = sched_smt_active() && test_idle_cores(target);
 	unsigned long task_util, util_min, util_max, best_cap = 0;
-	int fits, best_fits = 0;
+	int fits, best_fits = ASYM_IDLE_COMPLETE_MISFIT;
 	int cpu, best_cpu = -1;
 	struct cpumask *cpus;
 	int nr = INT_MAX;
@@ -8032,7 +8048,7 @@ select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target)
 		unsigned long cpu_cap = capacity_of(cpu);
 
 		/* We have found a good enough target. Just use it. */
-		if (--nr <= 0 && best_fits == -4)
+		if (--nr <= 0 && best_fits == ASYM_IDLE_CORE_UCLAMP_MISFIT)
 			return best_cpu;
 
 		if (!choose_idle_cpu(cpu, p))
@@ -8051,25 +8067,28 @@ select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target)
 			cpu_cap = get_actual_cpu_capacity(cpu);
 		/*
 		 * fits > 0 implies we are not on a preferred core
-		 * but the util fits CPU capacity. Set fits to -2 so
-		 * the effective range becomes [-2, 0] where:
-		 *    0 - does not fit
-		 *   -1 - fits with the exception of UCLAMP_MIN
-		 *   -2 - fits with the exception of preferred_core
+		 * but the util fits CPU capacity. Set fits to ASYM_IDLE_THREAD_FITS
+		 * so the effective range becomes
+		 * [ASYM_IDLE_THREAD_FITS, ASYM_IDLE_COMPLETE_MISFIT], where:
+		 *    ASYM_IDLE_COMPLETE_MISFIT - does not fit
+		 *    ASYM_IDLE_THREAD_UCLAMP_MISFIT - fits with the exception of UCLAMP_MIN
+		 *    ASYM_IDLE_THREAD_FITS - fits with the exception of preferred_core
 		 */
 		else if (fits > 0)
-			fits = -2;
+			fits = ASYM_IDLE_THREAD_FITS;
 
 		/*
 		 * If we are on a preferred core, translate the range of fits
-		 * of [-1, 0] to [-4, -3]. This ensures that an idle core
-		 * is always given priority over (partially) busy core.
+		 * of [ASYM_IDLE_THREAD_UCLAMP_MISFIT, ASYM_IDLE_COMPLETE_MISFIT] to
+		 * [ASYM_IDLE_CORE_UCLAMP_MISFIT, ASYM_IDLE_CORE_COMPLETE_MISFIT].
+		 * This ensures that an idle core is always given priority over
+		 * (partially) busy core.
 		 *
 		 * A fully fitting idle core would have returned early and hence
 		 * fits > 0 for preferred_core need not be dealt with.
 		 */
 		if (preferred_core)
-			fits -= 3;
+			fits += ASYM_IDLE_CORE_BIAS;
 
 		/*
 		 * First, select CPU which fits better (lower is more preferred).
@@ -8084,15 +8103,16 @@ select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target)
 	}
 
 	/*
-	 * A value in the [-4, -3] range means the chosen CPU is in a fully idle
-	 * SMT core. Values above -3 mean we never ranked such a CPU best.
+	 * A value in the [ASYM_IDLE_CORE_UCLAMP_MISFIT, ASYM_IDLE_CORE_BIAS]
+	 * range means the chosen CPU is in a fully idle SMT core. Values above
+	 * ASYM_IDLE_CORE_BIAS mean we never ranked such a CPU best.
 	 *
 	 * The asym-capacity wakeup path returns from select_idle_sibling()
 	 * after this function and never runs select_idle_cpu(), so the usual
 	 * select_idle_cpu() tail that clears idle cores must live here when the
 	 * idle-core preference did not win.
 	 */
-	if (prefers_idle_core && best_fits > -3)
+	if (prefers_idle_core && best_fits > ASYM_IDLE_CORE_BIAS)
 		set_idle_cores(target, false);
 
 	return best_cpu;
