@@ -151,14 +151,52 @@ static int __init setup_proxy_exec(char *str)
 	}
 	return 1;
 }
+
+DEFINE_STATIC_KEY_FALSE(__sched_proxy_exec_scx);
+static __always_inline bool sched_proxy_exec_scx(void)
+{
+	return static_branch_unlikely(&__sched_proxy_exec_scx);
+}
+
+static int __init setup_proxy_exec_scx(char *str)
+{
+	bool proxy_scx_enable = false;
+
+	if (*str && kstrtobool(str + 1, &proxy_scx_enable)) {
+		pr_warn("Unable to parse sched_proxy_exec_scx=\n");
+		return 0;
+	}
+
+	if (proxy_scx_enable) {
+		pr_info("sched_proxy_exec_scx enabled via boot arg\n");
+		static_branch_enable(&__sched_proxy_exec_scx);
+	} else {
+		pr_info("sched_proxy_exec_scx disabled via boot arg\n");
+		static_branch_disable(&__sched_proxy_exec_scx);
+	}
+
+	return 1;
+}
 #else
 static int __init setup_proxy_exec(char *str)
 {
 	pr_warn("CONFIG_SCHED_PROXY_EXEC=n, so it cannot be enabled or disabled at boot time\n");
 	return 0;
 }
+
+static __always_inline bool sched_proxy_exec_scx(void)
+{
+	return false;
+}
+
+static int __init setup_proxy_exec_scx(char *str)
+{
+	pr_warn("CONFIG_SCHED_PROXY_EXEC=n, so sched_proxy_exec_scx= is ignored\n");
+	return 0;
+}
 #endif
 __setup("sched_proxy_exec", setup_proxy_exec);
+__setup("sched_proxy_exec_scx", setup_proxy_exec_scx);
 
 /*
  * Debugging: various feature bits
@@ -7154,7 +7192,8 @@ static void __sched notrace __schedule(int sched_mode)
 		 * task_is_blocked() will always be false).
 		 */
 		try_to_block_task(rq, prev, &prev_state,
-				  !task_is_blocked(prev));
+				  !task_is_blocked(prev) ||
+				  (scx_enabled() && !sched_proxy_exec_scx()));
 		switch_count = &prev->nvcsw;
 	}
 
@@ -7167,6 +7206,14 @@ pick_again:
 
 		rq_set_donor(rq, next);
 		next->blocked_donor = NULL;
+		if (scx_enabled() && !sched_proxy_exec_scx()) {
+			if (unlikely(next->is_blocked)) {
+				next->is_blocked = 0;
+				clear_task_blocked_on(next, NULL);
+			}
+			goto picked;
+		}
+
 		if (unlikely(next->is_blocked)) {
 			next = find_proxy_task(rq, next, &rf);
 			if (!next) {

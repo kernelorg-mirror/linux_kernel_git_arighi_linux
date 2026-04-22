@@ -6751,6 +6751,12 @@ Kernel parameters
 			solution to mutex-based priority inversion.
 			Format: <bool>
 
+	sched_proxy_exec_scx= [KNL]
+			Enables or disables proxy execution when sched_ext is
+			enabled. The default is disabled, meaning proxy-exec
+			context donation is suppressed while sched_ext is active.
+			Format: <bool>
+
 	sched_verbose	[KNL,EARLY] Enables verbose scheduler debug messages.
 
 	schedstats=	[KNL,X86] Enable or disable scheduled statistics.
