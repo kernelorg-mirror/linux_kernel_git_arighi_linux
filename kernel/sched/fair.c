@@ -8083,6 +8083,8 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	 */
 	lockdep_assert_irqs_disabled();
 
+	guard(rcu)();
+
 	if (choose_idle_cpu(target, p) &&
 	    asym_fits_cpu(task_util, util_min, util_max, target))
 		return target;
@@ -12701,15 +12703,88 @@ static void kick_ilb(unsigned int flags)
 }
 
 /*
+ * Decide whether the ILB needs a stats and/or balance kick based on
+ * sched_domain state.
+ */
+static bool nohz_balancer_needs_kick(struct rq *rq)
+{
+	struct sched_domain_shared *sds;
+	struct sched_domain *sd;
+	int nr_busy, i, cpu = rq->cpu;
+
+	guard(rcu)();
+
+	sd = rcu_dereference_all(rq->sd);
+	if (sd) {
+		/*
+		 * If there's a runnable CFS task and the current CPU has reduced
+		 * capacity, kick the ILB to see if there's a better CPU to run on:
+		 */
+		if (rq->cfs.h_nr_runnable >= 1 && check_cpu_capacity(rq, sd))
+			return true;
+	}
+
+	sd = rcu_dereference_all(per_cpu(sd_asym_packing, cpu));
+	if (sd) {
+		/*
+		 * When ASYM_PACKING; see if there's a more preferred CPU
+		 * currently idle; in which case, kick the ILB to move tasks
+		 * around.
+		 *
+		 * When balancing between cores, all the SMT siblings of the
+		 * preferred CPU must be idle.
+		 */
+		for_each_cpu_and(i, sched_domain_span(sd), nohz.idle_cpus_mask) {
+			if (sched_asym(sd, i, cpu))
+				return true;
+		}
+	}
+
+	sd = rcu_dereference_all(per_cpu(sd_asym_cpucapacity, cpu));
+	if (sd) {
+		/*
+		 * When ASYM_CPUCAPACITY; see if there's a higher capacity CPU
+		 * to run the misfit task on.
+		 */
+		if (check_misfit_status(rq))
+			return true;
+
+		/*
+		 * For asymmetric systems, we do not want to nicely balance
+		 * cache use, instead we want to embrace asymmetry and only
+		 * ensure tasks have enough CPU capacity.
+		 *
+		 * Skip the LLC logic because it's not relevant in that case.
+		 */
+		return false;
+	}
+
+	sds = rcu_dereference_all(per_cpu(sd_llc_shared, cpu));
+	if (sds) {
+		/*
+		 * If there is an imbalance between LLC domains (IOW we could
+		 * increase the overall cache utilization), we need a less-loaded LLC
+		 * domain to pull some load from. Likewise, we may need to spread
+		 * load within the current LLC domain (e.g. packed SMT cores but
+		 * other CPUs are idle). We can't really know from here how busy
+		 * the others are - so just get a NOHZ balance going if it looks
+		 * like this LLC domain has tasks we could move.
+		 */
+		nr_busy = atomic_read(&sds->nr_busy_cpus);
+		if (nr_busy > 1)
+			return true;
+	}
+
+	return false;
+}
+
+/*
  * Current decision point for kicking the idle load balancer in the presence
  * of idle CPUs in the system.
  */
 static void nohz_balancer_kick(struct rq *rq)
 {
 	unsigned long now = jiffies;
-	struct sched_domain_shared *sds;
-	struct sched_domain *sd;
-	int nr_busy, i, cpu = rq->cpu;
 	unsigned int flags = 0;
 
 	if (unlikely(rq->idle_balance))
@@ -12749,78 +12824,8 @@ static void nohz_balancer_kick(struct rq *rq)
 		goto out;
 	}
 
-	rcu_read_lock();
-
-	sd = rcu_dereference_all(rq->sd);
-	if (sd) {
-		/*
-		 * If there's a runnable CFS task and the current CPU has reduced
-		 * capacity, kick the ILB to see if there's a better CPU to run on:
-		 */
-		if (rq->cfs.h_nr_runnable >= 1 && check_cpu_capacity(rq, sd)) {
-			flags = NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
-			goto unlock;
-		}
-	}
-
-	sd = rcu_dereference_all(per_cpu(sd_asym_packing, cpu));
-	if (sd) {
-		/*
-		 * When ASYM_PACKING; see if there's a more preferred CPU
-		 * currently idle; in which case, kick the ILB to move tasks
-		 * around.
-		 *
-		 * When balancing between cores, all the SMT siblings of the
-		 * preferred CPU must be idle.
-		 */
-		for_each_cpu_and(i, sched_domain_span(sd), nohz.idle_cpus_mask) {
-			if (sched_asym(sd, i, cpu)) {
-				flags = NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
-				goto unlock;
-			}
-		}
-	}
-
-	sd = rcu_dereference_all(per_cpu(sd_asym_cpucapacity, cpu));
-	if (sd) {
-		/*
-		 * When ASYM_CPUCAPACITY; see if there's a higher capacity CPU
-		 * to run the misfit task on.
-		 */
-		if (check_misfit_status(rq)) {
-			flags = NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
-			goto unlock;
-		}
-
-		/*
-		 * For asymmetric systems, we do not want to nicely balance
-		 * cache use, instead we want to embrace asymmetry and only
-		 * ensure tasks have enough CPU capacity.
-		 *
-		 * Skip the LLC logic because it's not relevant in that case.
-		 */
-		goto unlock;
-	}
-
-	sds = rcu_dereference_all(per_cpu(sd_llc_shared, cpu));
-	if (sds) {
-		/*
-		 * If there is an imbalance between LLC domains (IOW we could
-		 * increase the overall cache utilization), we need a less-loaded LLC
-		 * domain to pull some load from. Likewise, we may need to spread
-		 * load within the current LLC domain (e.g. packed SMT cores but
-		 * other CPUs are idle). We can't really know from here how busy
-		 * the others are - so just get a NOHZ balance going if it looks
-		 * like this LLC domain has tasks we could move.
-		 */
-		nr_busy = atomic_read(&sds->nr_busy_cpus);
-		if (nr_busy > 1) {
-			flags = NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
-			goto unlock;
-		}
-	}
-unlock:
-	rcu_read_unlock();
+	if (nohz_balancer_needs_kick(rq))
+		flags |= NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
 out:
 	if (READ_ONCE(nohz.needs_update))
 		flags |= NOHZ_NEXT_KICK;
@@ -12833,16 +12838,14 @@ static void set_cpu_sd_state_busy(int cpu)
 {
 	struct sched_domain *sd;
 
-	rcu_read_lock();
+	guard(rcu)();
 	sd = rcu_dereference_all(per_cpu(sd_llc, cpu));
 
 	if (!sd || !sd->nohz_idle)
-		goto unlock;
+		return;
 	sd->nohz_idle = 0;
 
 	atomic_inc(&sd->shared->nr_busy_cpus);
-unlock:
-	rcu_read_unlock();
 }
 
 void nohz_balance_exit_idle(struct rq *rq)
@@ -12862,16 +12865,14 @@ static void set_cpu_sd_state_idle(int cpu)
 {
 	struct sched_domain *sd;
 
-	rcu_read_lock();
+	guard(rcu)();
 	sd = rcu_dereference_all(per_cpu(sd_llc, cpu));
 
 	if (!sd || sd->nohz_idle)
-		goto unlock;
+		return;
 	sd->nohz_idle = 1;
 
 	atomic_dec(&sd->shared->nr_busy_cpus);
-unlock:
-	rcu_read_unlock();
 }
 
 /*
