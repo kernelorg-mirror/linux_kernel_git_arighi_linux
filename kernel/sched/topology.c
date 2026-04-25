@@ -1732,10 +1732,6 @@ sd_init(struct sched_domain_topology_level *tl,
 		.name			= tl->name,
 	};
 
-	WARN_ONCE((sd->flags & (SD_SHARE_CPUCAPACITY | SD_ASYM_CPUCAPACITY)) ==
-		  (SD_SHARE_CPUCAPACITY | SD_ASYM_CPUCAPACITY),
-		  "CPU capacity asymmetry not supported on SMT\n");
-
 	/*
 	 * Convert topological properties into behaviour.
 	 */
