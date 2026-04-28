@@ -12749,8 +12749,6 @@ static void nohz_balancer_kick(struct rq *rq)
 		goto out;
 	}
 
-	rcu_read_lock();
-
 	sd = rcu_dereference_all(rq->sd);
 	if (sd) {
 		/*
@@ -12758,8 +12756,8 @@ static void nohz_balancer_kick(struct rq *rq)
 		 * capacity, kick the ILB to see if there's a better CPU to run on:
 		 */
 		if (rq->cfs.h_nr_runnable >= 1 && check_cpu_capacity(rq, sd)) {
-			flags = NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
-			goto unlock;
+			flags |= NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
+			goto out;
 		}
 	}
 
@@ -12775,8 +12773,8 @@ static void nohz_balancer_kick(struct rq *rq)
 		 */
 		for_each_cpu_and(i, sched_domain_span(sd), nohz.idle_cpus_mask) {
 			if (sched_asym(sd, i, cpu)) {
-				flags = NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
-				goto unlock;
+				flags |= NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
+				goto out;
 			}
 		}
 	}
@@ -12787,10 +12785,8 @@ static void nohz_balancer_kick(struct rq *rq)
 		 * When ASYM_CPUCAPACITY; see if there's a higher capacity CPU
 		 * to run the misfit task on.
 		 */
-		if (check_misfit_status(rq)) {
-			flags = NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
-			goto unlock;
-		}
+		if (check_misfit_status(rq))
+			flags |= NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
 
 		/*
 		 * For asymmetric systems, we do not want to nicely balance
@@ -12799,10 +12795,10 @@ static void nohz_balancer_kick(struct rq *rq)
 		 *
 		 * Skip the LLC logic because it's not relevant in that case.
 		 */
-		goto unlock;
+		goto out;
 	}
 
-	sds = rcu_dereference_all(per_cpu(sd_llc_shared, cpu));
+	sds = rcu_dereference_all(per_cpu(sd_balance_shared, cpu));
 	if (sds) {
 		/*
 		 * If there is an imbalance between LLC domains (IOW we could
@@ -12814,13 +12810,9 @@ static void nohz_balancer_kick(struct rq *rq)
 		 * like this LLC domain has tasks we could move.
 		 */
 		nr_busy = atomic_read(&sds->nr_busy_cpus);
-		if (nr_busy > 1) {
-			flags = NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
-			goto unlock;
-		}
+		if (nr_busy > 1)
+			flags |= NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
 	}
-unlock:
-	rcu_read_unlock();
 out:
 	if (READ_ONCE(nohz.needs_update))
 		flags |= NOHZ_NEXT_KICK;
@@ -12832,17 +12824,13 @@ out:
 static void set_cpu_sd_state_busy(int cpu)
 {
 	struct sched_domain *sd;
-
-	rcu_read_lock();
 	sd = rcu_dereference_all(per_cpu(sd_llc, cpu));
 
 	if (!sd || !sd->nohz_idle)
-		goto unlock;
+		return;
 	sd->nohz_idle = 0;
 
 	atomic_inc(&sd->shared->nr_busy_cpus);
-unlock:
-	rcu_read_unlock();
 }
 
 void nohz_balance_exit_idle(struct rq *rq)
@@ -12861,17 +12849,13 @@ void nohz_balance_exit_idle(struct rq *rq)
 static void set_cpu_sd_state_idle(int cpu)
 {
 	struct sched_domain *sd;
-
-	rcu_read_lock();
 	sd = rcu_dereference_all(per_cpu(sd_llc, cpu));
 
 	if (!sd || sd->nohz_idle)
-		goto unlock;
+		return;
 	sd->nohz_idle = 1;
 
 	atomic_dec(&sd->shared->nr_busy_cpus);
-unlock:
-	rcu_read_unlock();
 }
 
 /*
