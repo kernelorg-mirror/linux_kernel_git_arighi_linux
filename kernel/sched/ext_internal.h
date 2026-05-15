@@ -1054,7 +1054,7 @@ enum scx_sched_pcpu_flags {
 /* dispatch buf */
 struct scx_dsp_buf_ent {
 	struct task_struct	*task;
-	unsigned long		qseq;
+	u64			qseq;
 	u64			dsq_id;
 	u64			enq_flags;
 };

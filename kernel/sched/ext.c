@@ -1898,6 +1898,16 @@ static void mark_direct_dispatch(struct scx_sched *sch,
 		return;
 	}
 
+	/*
+	 * No qseq validation is needed here. Direct dispatch from ops.enqueue()
+	 * happens while @p is in SCX_OPSS_QUEUEING state under its rq lock,
+	 * preventing concurrent dequeue or re-enqueue. Direct dispatch from
+	 * ops.select_cpu() happens before @p has been handed to the BPF
+	 * scheduler, so no concurrent dequeue is possible either.
+	 * finish_dispatch() validates qseq only on the deferred (ops.dispatch())
+	 * path, where @p may have left SCX_OPSS_QUEUED state between
+	 * scx_bpf_dsq_insert() and the actual dispatch.
+	 */
 	WARN_ON_ONCE(p->scx.ddsp_dsq_id != SCX_DSQ_INVALID);
 	WARN_ON_ONCE(p->scx.ddsp_enq_flags);
 
@@ -2778,7 +2788,7 @@ static void dispatch_to_local_dsq(struct scx_sched *sch, struct rq *rq,
  */
 static void finish_dispatch(struct scx_sched *sch, struct rq *rq,
 			    struct task_struct *p,
-			    unsigned long qseq_at_dispatch,
+			    u64 qseq_at_dispatch,
 			    u64 dsq_id, u64 enq_flags)
 {
 	struct scx_dispatch_q *dsq;
@@ -8637,7 +8647,7 @@ static bool scx_dsq_insert_preamble(struct scx_sched *sch, struct task_struct *p
 }
 
 static void scx_dsq_insert_stage(struct scx_sched *sch, struct task_struct *p,
-				  u64 dsq_id, u64 enq_flags)
+			       u64 dsq_id, u64 enq_flags, u64 qseq)
 {
 	struct scx_dsp_ctx *dspc = &this_cpu_ptr(sch->pcpu)->dsp_ctx;
 	struct task_struct *ddsp_task;
@@ -8655,7 +8665,7 @@ static void scx_dsq_insert_stage(struct scx_sched *sch, struct task_struct *p,
 
 	dspc->buf[dspc->cursor++] = (struct scx_dsp_buf_ent){
 		.task = p,
-		.qseq = atomic_long_read(&p->scx.ops_state) & SCX_OPSS_QSEQ_MASK,
+		.qseq = qseq,
 		.dsq_id = dsq_id,
 		.enq_flags = enq_flags,
 	};
@@ -8722,7 +8732,8 @@ __bpf_kfunc bool scx_bpf_dsq_insert___v2(struct task_struct *p, u64 dsq_id,
 	else
 		p->scx.slice = p->scx.slice ?: 1;
 
-	scx_dsq_insert_stage(sch, p, dsq_id, enq_flags);
+	scx_dsq_insert_stage(sch, p, dsq_id, enq_flags,
+			      atomic_long_read(&p->scx.ops_state) & SCX_OPSS_QSEQ_MASK);
 
 	return true;
 }
@@ -8750,7 +8761,8 @@ static bool scx_dsq_insert_vtime(struct scx_sched *sch, struct task_struct *p,
 
 	p->scx.dsq_vtime = vtime;
 
-	scx_dsq_insert_stage(sch, p, dsq_id, enq_flags | SCX_ENQ_DSQ_PRIQ);
+	scx_dsq_insert_stage(sch, p, dsq_id, enq_flags | SCX_ENQ_DSQ_PRIQ,
+			      atomic_long_read(&p->scx.ops_state) & SCX_OPSS_QSEQ_MASK);
 
 	return true;
 }
@@ -8837,6 +8849,92 @@ __bpf_kfunc void scx_bpf_dsq_insert_vtime(struct task_struct *p, u64 dsq_id,
 #endif
 
 	scx_dsq_insert_vtime(sch, p, dsq_id, slice, vtime, enq_flags);
+}
+
+/**
+ * scx_bpf_dsq_insert_begin - Begin a dispatch transaction for a task
+ * @p: task_struct to dispatch
+ *
+ * Returns an opaque u64 token encoding @p's current scheduling state
+ * sequence number. Pass it to scx_bpf_dsq_insert_commit() in ops.dispatch().
+ *
+ * This function addresses a race in schedulers that queue tasks in
+ * ops.enqueue() and dispatch them later in ops.dispatch() without
+ * implementing ops.dequeue(). Between queuing and dispatch, @p may be
+ * dequeued, migrated, or re-enqueued on another CPU. Without token
+ * validation a stale dispatch would silently succeed, running @p from the
+ * wrong queue context.
+ *
+ * Capture the token before any per-task validation or pre-dispatch work.
+ * A commit with a stale token (one where @p was dequeued or re-enqueued
+ * after begin()) is detected asynchronously by finish_dispatch() and
+ * discarded.
+ *
+ * Schedulers that implement ops.dequeue() with proper synchronization do not
+ * need this API.
+ */
+__bpf_kfunc u64 scx_bpf_dsq_insert_begin(struct task_struct *p)
+{
+	return atomic_long_read(&p->scx.ops_state) & SCX_OPSS_QSEQ_MASK;
+}
+
+struct scx_bpf_dsq_insert_commit_args {
+	/* @p can't be packed together as KF_RCU is not transitive */
+	u64			dsq_id;
+	u64			slice;
+	u64			enq_flags;
+};
+
+/**
+ * scx_bpf_dsq_insert_commit - Commit a dispatch transaction
+ * @p: task_struct to insert
+ * @args: pointer to struct scx_bpf_dsq_insert_commit_args
+ * @token: token from scx_bpf_dsq_insert_begin()
+ * @aux: implicit BPF argument
+ *
+ * May only be called from ops.dispatch(). Inserts @p into a local DSQ after
+ * validating @token against @p's current scheduling state. If @p was
+ * dequeued or re-enqueued between scx_bpf_dsq_insert_begin() and this call,
+ * the dispatch is silently discarded; stale-token detection fires
+ * asynchronously in finish_dispatch() after ops.dispatch() returns.
+ *
+ * Only local DSQs (SCX_DSQ_LOCAL or SCX_DSQ_LOCAL_ON | cpu) are valid
+ * targets. Attempting to commit to a non-local DSQ aborts the scheduler.
+ *
+ * Returns %true if @p was staged for dispatch, %false if @p is not owned by
+ * this scheduler. A %true return does not guarantee the task was actually
+ * dispatched: a stale token is detected after ops.dispatch() returns.
+ */
+__bpf_kfunc bool scx_bpf_dsq_insert_commit(struct task_struct *p,
+					    struct scx_bpf_dsq_insert_commit_args *args,
+					    u64 token,
+					    const struct bpf_prog_aux *aux)
+{
+	struct scx_sched *sch;
+	u64 enq_flags = args->enq_flags;
+
+	guard(rcu)();
+	sch = scx_prog_sched(aux);
+	if (unlikely(!sch))
+		return false;
+
+	if (args->dsq_id != SCX_DSQ_LOCAL &&
+	    (args->dsq_id & SCX_DSQ_LOCAL_ON) != SCX_DSQ_LOCAL_ON) {
+		scx_error(sch, "scx_bpf_dsq_insert_commit() may only target local DSQs");
+		return false;
+	}
+
+	if (!scx_dsq_insert_preamble(sch, p, args->dsq_id, &enq_flags))
+		return false;
+
+	if (args->slice)
+		p->scx.slice = args->slice;
+	else
+		p->scx.slice = p->scx.slice ?: 1;
+
+	scx_dsq_insert_stage(sch, p, args->dsq_id, enq_flags, token);
+
+	return true;
 }
 
 __bpf_kfunc_end_defs();
@@ -9207,6 +9305,7 @@ __bpf_kfunc bool scx_bpf_sub_dispatch(u64 cgroup_id, const struct bpf_prog_aux *
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(scx_kfunc_ids_dispatch)
+BTF_ID_FLAGS(func, scx_bpf_dsq_insert_commit, KF_IMPLICIT_ARGS | KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_dispatch_nr_slots, KF_IMPLICIT_ARGS)
 BTF_ID_FLAGS(func, scx_bpf_dispatch_cancel, KF_IMPLICIT_ARGS)
 BTF_ID_FLAGS(func, scx_bpf_dsq_move_to_local, KF_IMPLICIT_ARGS)
@@ -10518,6 +10617,7 @@ BTF_ID_FLAGS(func, scx_bpf_put_cpumask, KF_RELEASE)
 BTF_ID_FLAGS(func, scx_bpf_task_running, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_task_cpu, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_task_cid, KF_RCU)
+BTF_ID_FLAGS(func, scx_bpf_dsq_insert_begin, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_cpu_rq, KF_IMPLICIT_ARGS)
 BTF_ID_FLAGS(func, scx_bpf_locked_rq, KF_IMPLICIT_ARGS | KF_RET_NULL)
 BTF_ID_FLAGS(func, scx_bpf_cpu_curr, KF_IMPLICIT_ARGS | KF_RET_NULL | KF_RCU_PROTECTED)

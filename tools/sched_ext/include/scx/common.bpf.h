@@ -63,6 +63,8 @@ s32 scx_bpf_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags, 
 s32 __scx_bpf_select_cpu_and(struct task_struct *p, const struct cpumask *cpus_allowed,
 			     struct scx_bpf_select_cpu_and_args *args) __ksym __weak;
 bool __scx_bpf_dsq_insert_vtime(struct task_struct *p, struct scx_bpf_dsq_insert_vtime_args *args) __ksym __weak;
+u64 scx_bpf_dsq_insert_begin(struct task_struct *p) __ksym __weak;
+bool scx_bpf_dsq_insert_commit(struct task_struct *p, struct scx_bpf_dsq_insert_commit_args *args, u64 token) __ksym __weak;
 u32 scx_bpf_dispatch_nr_slots(void) __ksym;
 void scx_bpf_dispatch_cancel(void) __ksym;
 void scx_bpf_kick_cpu(s32 cpu, u64 flags) __ksym;
