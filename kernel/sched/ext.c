@@ -8636,7 +8636,7 @@ static bool scx_dsq_insert_preamble(struct scx_sched *sch, struct task_struct *p
 	return true;
 }
 
-static void scx_dsq_insert_commit(struct scx_sched *sch, struct task_struct *p,
+static void scx_dsq_insert_stage(struct scx_sched *sch, struct task_struct *p,
 				  u64 dsq_id, u64 enq_flags)
 {
 	struct scx_dsp_ctx *dspc = &this_cpu_ptr(sch->pcpu)->dsp_ctx;
@@ -8722,7 +8722,7 @@ __bpf_kfunc bool scx_bpf_dsq_insert___v2(struct task_struct *p, u64 dsq_id,
 	else
 		p->scx.slice = p->scx.slice ?: 1;
 
-	scx_dsq_insert_commit(sch, p, dsq_id, enq_flags);
+	scx_dsq_insert_stage(sch, p, dsq_id, enq_flags);
 
 	return true;
 }
@@ -8750,7 +8750,7 @@ static bool scx_dsq_insert_vtime(struct scx_sched *sch, struct task_struct *p,
 
 	p->scx.dsq_vtime = vtime;
 
-	scx_dsq_insert_commit(sch, p, dsq_id, enq_flags | SCX_ENQ_DSQ_PRIQ);
+	scx_dsq_insert_stage(sch, p, dsq_id, enq_flags | SCX_ENQ_DSQ_PRIQ);
 
 	return true;
 }
