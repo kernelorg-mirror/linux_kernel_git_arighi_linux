@@ -1619,6 +1619,9 @@ static void local_dsq_post_enq(struct scx_sched *sch, struct scx_dispatch_q *dsq
 	if (rq->scx.flags & SCX_RQ_IN_BALANCE)
 		return;
 
+	if (enq_flags & SCX_ENQ_KICK_IDLE)
+		scx_kick_cpu(sch, cpu_of(rq), SCX_KICK_IDLE);
+
 	if ((enq_flags & SCX_ENQ_PREEMPT) && p != rq->curr &&
 	    rq->curr->sched_class == &ext_sched_class) {
 		rq->curr->scx.slice = 0;
@@ -8607,14 +8610,19 @@ static bool scx_vet_enq_flags(struct scx_sched *sch, u64 dsq_id, u64 *enq_flags)
 	bool is_local = dsq_id == SCX_DSQ_LOCAL ||
 		(dsq_id & SCX_DSQ_LOCAL_ON) == SCX_DSQ_LOCAL_ON;
 
-	if (*enq_flags & SCX_ENQ_IMMED) {
-		if (unlikely(!is_local)) {
-			scx_error(sch, "SCX_ENQ_IMMED on a non-local DSQ 0x%llx", dsq_id);
-			return false;
-		}
-	} else if ((sch->ops.flags & SCX_OPS_ALWAYS_ENQ_IMMED) && is_local) {
-		*enq_flags |= SCX_ENQ_IMMED;
+	if (unlikely((*enq_flags & SCX_ENQ_IMMED) && !is_local)) {
+		scx_error(sch, "SCX_ENQ_IMMED on a non-local DSQ 0x%llx", dsq_id);
+		return false;
 	}
+
+	if (unlikely((*enq_flags & SCX_ENQ_KICK_IDLE) && !is_local)) {
+		scx_error(sch, "SCX_ENQ_KICK_IDLE on a non-local DSQ 0x%llx", dsq_id);
+		return false;
+	}
+
+	if (!(*enq_flags & SCX_ENQ_IMMED) &&
+	    (sch->ops.flags & SCX_OPS_ALWAYS_ENQ_IMMED) && is_local)
+		*enq_flags |= SCX_ENQ_IMMED;
 
 	return true;
 }
@@ -8708,6 +8716,10 @@ __bpf_kfunc_start_defs();
  * exhaustion. If zero, the current residual slice is maintained. If
  * %SCX_SLICE_INF, @p never expires and the BPF scheduler must kick the CPU with
  * scx_bpf_kick_cpu() to trigger scheduling.
+ *
+ * If @p is inserted into a local DSQ, %SCX_ENQ_KICK_IDLE can be used to
+ * automatically kick the CPU owning that local DSQ with %SCX_KICK_IDLE after
+ * insertion.
  *
  * Returns %true on successful insertion, %false on failure. On the root
  * scheduler, %false return triggers scheduler abort and the caller doesn't need

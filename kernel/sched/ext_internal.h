@@ -1274,6 +1274,13 @@ enum scx_enq_flags {
 	SCX_ENQ_IMMED		= 1LLU << 33,
 
 	/*
+	 * Only allowed on local DSQs. After successfully inserting the task
+	 * into a local DSQ, kick the CPU owning that local DSQ as if
+	 * scx_bpf_kick_cpu() was called with %SCX_KICK_IDLE.
+	 */
+	SCX_ENQ_KICK_IDLE	= 1LLU << 34,
+
+	/*
 	 * The task being enqueued was previously enqueued on a DSQ, but was
 	 * removed and is being re-enqueued. See SCX_TASK_REENQ_* flags to find
 	 * out why a given task is being reenqueued.

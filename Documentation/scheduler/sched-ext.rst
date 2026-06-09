@@ -410,6 +410,10 @@ dispatching, and must be dispatched to with ``scx_bpf_dsq_insert()``. See
 the function documentation and usage in ``tools/sched_ext/scx_simple.bpf.c``
 for more information.
 
+When inserting into a local DSQ, ``SCX_ENQ_KICK_IDLE`` can be set in
+``enq_flags`` to automatically kick the target CPU with ``SCX_KICK_IDLE``
+after the task is inserted.
+
 Task Lifecycle
 --------------
 
