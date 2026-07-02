@@ -184,6 +184,22 @@ enum scx_ops_flags {
 	 */
 	SCX_OPS_TID_TO_TASK		= 1LLU << 8,
 
+	/*
+	 * Mutex-blocked tasks may remain runnable as donors for proxy execution.
+	 * By default, such tasks are dispatched directly to the local DSQ so
+	 * that schedulers which aren't proxy-aware preserve proxy execution.
+	 *
+	 * If this flag is set, blocked donors are passed to ops.enqueue(). The
+	 * BPF scheduler can identify them with scx_bpf_task_is_blocked(). To
+	 * allow proxy execution, dispatch the donor to the local DSQ of its
+	 * associated CPU. To opt out, keep it under BPF control until it is no
+	 * longer blocked.
+	 *
+	 * For blocked donors, this flag takes precedence over
+	 * %SCX_OPS_ENQ_EXITING and %SCX_OPS_ENQ_MIGRATION_DISABLED.
+	 */
+	SCX_OPS_ENQ_BLOCKED		= 1LLU << 9,
+
 	SCX_OPS_ALL_FLAGS		= SCX_OPS_KEEP_BUILTIN_IDLE |
 					  SCX_OPS_ENQ_LAST |
 					  SCX_OPS_ENQ_EXITING |
@@ -192,7 +208,8 @@ enum scx_ops_flags {
 					  SCX_OPS_SWITCH_PARTIAL |
 					  SCX_OPS_BUILTIN_IDLE_PER_NODE |
 					  SCX_OPS_ALWAYS_ENQ_IMMED |
-					  SCX_OPS_TID_TO_TASK,
+					  SCX_OPS_TID_TO_TASK |
+					  SCX_OPS_ENQ_BLOCKED,
 
 	/* high 8 bits are internal, don't include in SCX_OPS_ALL_FLAGS */
 	__SCX_OPS_INTERNAL_MASK		= 0xffLLU << 56,

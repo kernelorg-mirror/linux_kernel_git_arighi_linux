@@ -1875,6 +1875,7 @@ static void do_enqueue_task(struct rq *rq, struct task_struct *p, u64 enq_flags,
 	struct scx_sched *sch = scx_task_sched(p);
 	struct task_struct **ddsp_taskp;
 	struct scx_dispatch_q *dsq;
+	bool enq_blocked;
 	unsigned long qseq;
 
 	WARN_ON_ONCE(!(p->scx.flags & SCX_TASK_QUEUED));
@@ -1907,15 +1908,20 @@ static void do_enqueue_task(struct rq *rq, struct task_struct *p, u64 enq_flags,
 	if (p->scx.ddsp_dsq_id != SCX_DSQ_INVALID)
 		goto direct;
 
+	/* %SCX_OPS_ENQ_BLOCKED takes precedence over the fallbacks below. */
+	enq_blocked = task_is_blocked(p) &&
+		      (sch->ops.flags & SCX_OPS_ENQ_BLOCKED);
+
 	/* see %SCX_OPS_ENQ_EXITING */
-	if (!(sch->ops.flags & SCX_OPS_ENQ_EXITING) &&
+	if (!enq_blocked && !(sch->ops.flags & SCX_OPS_ENQ_EXITING) &&
 	    unlikely(p->flags & PF_EXITING)) {
 		__scx_add_event(sch, SCX_EV_ENQ_SKIP_EXITING, 1);
 		goto local;
 	}
 
 	/* see %SCX_OPS_ENQ_MIGRATION_DISABLED */
-	if (!(sch->ops.flags & SCX_OPS_ENQ_MIGRATION_DISABLED) &&
+	if (!enq_blocked &&
+	    !(sch->ops.flags & SCX_OPS_ENQ_MIGRATION_DISABLED) &&
 	    is_migration_disabled(p)) {
 		__scx_add_event(sch, SCX_EV_ENQ_SKIP_MIGRATION_DISABLED, 1);
 		goto local;
@@ -2217,11 +2223,18 @@ static void wakeup_preempt_scx(struct rq *rq, struct task_struct *p, int wake_fl
 {
 	/*
 	 * Preemption between SCX tasks is implemented by resetting the victim
-	 * task's slice to 0 and triggering reschedule on the target CPU.
-	 * Nothing to do.
+	 * task's slice to 0 and triggering reschedule on the target CPU. A
+	 * mutex-blocked task is kept queued for proxy execution, so its wakeup
+	 * doesn't go through enqueue_task_scx(). If the BPF scheduler manages
+	 * blocked donors, reschedule explicitly so that it can reconsider a
+	 * donor it declined to dispatch while blocked.
 	 */
-	if (p->sched_class == &ext_sched_class)
+	if (p->sched_class == &ext_sched_class) {
+		if (p->is_blocked &&
+		    (scx_task_sched(p)->ops.flags & SCX_OPS_ENQ_BLOCKED))
+			resched_curr(rq);
 		return;
+	}
 
 	/*
 	 * Getting preempted by a higher-priority class. Reenqueue IMMED tasks.
@@ -3113,18 +3126,17 @@ static void put_prev_task_scx(struct rq *rq, struct task_struct *p,
 
 		/*
 		 * Mutex-blocked donors stay queued on the runqueue under proxy
-		 * execution, but the donor never runs as itself, proxy-exec
-		 * walks the blocked_on chain on the next __schedule() and runs
-		 * the lock owner in its place.
-		 *
-		 * Put the donor on the local DSQ directly, so pick_next_task()
-		 * can still see it, find_proxy_task() will be invoked on
-		 * next->blocked_on and either run the chain owner here, or call
-		 * proxy_force_return() and let BPF make a new dispatch decision
-		 * once the task is no longer blocked.
+		 * execution. Preserve the forced-local behavior by default so that
+		 * proxy-unaware BPF schedulers keep working. A scheduler which opts
+		 * into %SCX_OPS_ENQ_BLOCKED receives the donor through ops.enqueue()
+		 * and decides whether to make it available for proxy execution.
 		 */
 		if (task_is_blocked(p)) {
-			dispatch_enqueue(sch, rq, &rq->scx.local_dsq, p, 0);
+			if (sch->ops.flags & SCX_OPS_ENQ_BLOCKED)
+				do_enqueue_task(rq, p, 0, -1);
+			else
+				dispatch_enqueue(sch, rq, &rq->scx.local_dsq,
+						 p, 0);
 			goto switch_class;
 		}
 
@@ -10141,6 +10153,20 @@ __bpf_kfunc bool scx_bpf_task_running(const struct task_struct *p)
 }
 
 /**
+ * scx_bpf_task_is_blocked - Is a task currently blocked?
+ * @p: task of interest
+ *
+ * A BPF scheduler using %SCX_OPS_ENQ_BLOCKED can opt a blocked donor out of
+ * proxy execution by keeping it under BPF control instead of dispatching it
+ * to %SCX_DSQ_LOCAL_ON | scx_bpf_task_cpu(p) until this function returns
+ * false.
+ */
+__bpf_kfunc bool scx_bpf_task_is_blocked(struct task_struct *p)
+{
+	return task_is_blocked(p);
+}
+
+/**
  * scx_bpf_task_cpu - CPU a task is currently associated with
  * @p: task of interest
  */
@@ -10482,6 +10508,7 @@ BTF_ID_FLAGS(func, scx_bpf_get_possible_cpumask, KF_ACQUIRE)
 BTF_ID_FLAGS(func, scx_bpf_get_online_cpumask, KF_ACQUIRE)
 BTF_ID_FLAGS(func, scx_bpf_put_cpumask, KF_RELEASE)
 BTF_ID_FLAGS(func, scx_bpf_task_running, KF_RCU)
+BTF_ID_FLAGS(func, scx_bpf_task_is_blocked, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_task_cpu, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_task_cid, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_cpu_rq, KF_IMPLICIT_ARGS)
