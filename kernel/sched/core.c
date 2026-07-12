@@ -6764,6 +6764,45 @@ static void proxy_deactivate(struct rq *rq, struct task_struct *donor)
 	block_task(rq, donor, state);
 }
 
+/*
+ * Remove a retained proxy donor before changing its scheduler ownership.
+ * The caller holds p->pi_lock, so p cannot wake and migrate after block_task()
+ * drops it from the runqueue.
+ *
+ * Unlike the regular schedule() path, this must leave @p fully dequeued.
+ * DELAY_DEQUEUE may keep a blocked fair task queued with sched_delayed set,
+ * which would let the following sched_change preserve and re-enqueue it under
+ * the new scheduler. Complete an existing or newly-created delayed dequeue
+ * before returning.
+ */
+void sched_proxy_block_task(struct rq *rq, struct task_struct *p)
+{
+	unsigned long state = READ_ONCE(p->__state);
+
+	lockdep_assert_held(&p->pi_lock);
+	lockdep_assert_rq_held(rq);
+
+	if (!p->is_blocked || !task_on_rq_queued(p))
+		return;
+	if (WARN_ON_ONCE(state == TASK_RUNNING))
+		return;
+
+	if (task_current_donor(rq, p)) {
+		proxy_resched_idle(rq);
+		/* Kick the execution context if @rq is remote. */
+		resched_curr(rq);
+	}
+
+	if (!p->se.sched_delayed)
+		block_task(rq, p, state);
+	if (p->se.sched_delayed)
+		dequeue_task(rq, p, DEQUEUE_SLEEP | DEQUEUE_DELAYED |
+			     DEQUEUE_NOCLOCK);
+
+	WARN_ON_ONCE(task_on_rq_queued(p));
+	WARN_ON_ONCE(p->se.sched_delayed);
+}
+
 static inline void proxy_release_rq_lock(struct rq *rq, struct rq_flags *rf)
 	__releases(__rq_lockp(rq))
 {
