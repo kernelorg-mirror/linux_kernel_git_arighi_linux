@@ -1420,11 +1420,8 @@ static void nohz_csd_func(void *info)
 #endif /* CONFIG_NO_HZ_COMMON */
 
 #ifdef CONFIG_NO_HZ_FULL
-static inline bool __need_bw_check(struct rq *rq, struct task_struct *p)
+static inline bool __need_bw_check(struct task_struct *p)
 {
-	if (rq->nr_running != 1)
-		return false;
-
 	if (p->sched_class != &fair_sched_class)
 		return false;
 
@@ -1440,6 +1437,14 @@ bool sched_can_stop_tick(struct rq *rq)
 
 	/* Deadline tasks, even if single, need the tick */
 	if (rq->dl.dl_nr_running)
+		return false;
+
+	/*
+	 * A bandwidth-constrained FAIR donor can proxy-execute an owner from a
+	 * lower scheduling class. Check the selected scheduling context before
+	 * the class-specific fast paths below inspect the execution context.
+	 */
+	if (__need_bw_check(rq->donor) && cfs_task_bw_constrained(rq->donor))
 		return false;
 
 	/*
@@ -1471,18 +1476,6 @@ bool sched_can_stop_tick(struct rq *rq)
 
 	if (rq->cfs.h_nr_queued > 1)
 		return false;
-
-	/*
-	 * If there is one task and it has CFS runtime bandwidth constraints
-	 * and it's on the cpu now we don't want to stop the tick.
-	 * This check prevents clearing the bit if a newly enqueued task here is
-	 * dequeued by migrating while the constrained task continues to run.
-	 * E.g. going from 2->1 without going through pick_next_task().
-	 */
-	if (__need_bw_check(rq, rq->curr)) {
-		if (cfs_task_bw_constrained(rq->curr))
-			return false;
-	}
 
 	return true;
 }
@@ -7222,6 +7215,8 @@ pick_again:
 			}
 			if (next == rq->idle) {
 				zap_balance_callbacks(rq);
+				if (rq->donor != prev_donor)
+					sched_update_tick_dependency(rq);
 				goto keep_resched;
 			}
 		}
@@ -7242,6 +7237,8 @@ pick_again:
 			donor->sched_class->put_prev_task(rq, donor, donor);
 			donor->sched_class->set_next_task(rq, donor, true);
 		}
+		if (rq->donor != prev_donor)
+			sched_update_tick_dependency(rq);
 	} else {
 		rq_set_donor(rq, next);
 	}
