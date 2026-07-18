@@ -2023,6 +2023,14 @@ static void enqueue_task_scx(struct rq *rq, struct task_struct *p, int core_enq_
 	int sticky_cpu = p->scx.sticky_cpu;
 	u64 enq_flags = core_enq_flags | rq->scx.remote_activate_enq_flags;
 
+	/*
+	 * Sleeping-owner activation uses wakeup semantics for the core
+	 * scheduling classes, but the donor remains blocked. Expose it to BPF
+	 * as a blocked-donor admission rather than a full wakeup.
+	 */
+	if (core_enq_flags & ENQUEUE_PROXY)
+		enq_flags &= ~(ENQUEUE_PROXY | SCX_ENQ_WAKEUP);
+
 	if (enq_flags & ENQUEUE_WAKEUP)
 		rq->scx.flags |= SCX_RQ_IN_WAKEUP;
 
