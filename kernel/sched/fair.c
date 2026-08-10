@@ -1303,7 +1303,8 @@ static bool update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 #include "pelt.h"
 
-static int select_idle_sibling(struct task_struct *p, int prev_cpu, int cpu);
+static int select_idle_sibling(struct task_struct *p, int prev_cpu, int cpu,
+			       const struct cpumask *cpus_allowed);
 static unsigned long task_h_load(struct task_struct *p);
 static unsigned long capacity_of(int cpu);
 
@@ -8441,14 +8442,17 @@ static int wake_affine(struct sched_domain *sd, struct task_struct *p,
 }
 
 static struct sched_group *
-sched_balance_find_dst_group(struct sched_domain *sd, struct task_struct *p, int this_cpu);
+sched_balance_find_dst_group(struct sched_domain *sd, struct task_struct *p, int this_cpu,
+			     const struct cpumask *cpus_allowed);
 
 /*
  * sched_balance_find_dst_group_cpu - find the idlest CPU among the CPUs in the group.
  */
 static int
-sched_balance_find_dst_group_cpu(struct sched_group *group, struct task_struct *p, int this_cpu)
+sched_balance_find_dst_group_cpu(struct sched_group *group, struct task_struct *p, int this_cpu,
+				 const struct cpumask *cpus_allowed)
 {
+	const struct cpumask *allowed = cpus_allowed ?: p->cpus_ptr;
 	unsigned long load, min_load = ULONG_MAX;
 	unsigned int min_exit_latency = UINT_MAX;
 	u64 latest_idle_timestamp = 0;
@@ -8456,12 +8460,15 @@ sched_balance_find_dst_group_cpu(struct sched_group *group, struct task_struct *
 	int shallowest_idle_cpu = -1;
 	int i;
 
+	if (cpus_allowed && !cpumask_test_cpu(this_cpu, allowed))
+		least_loaded_cpu = cpumask_first_and(sched_group_span(group), allowed);
+
 	/* Check if we have any choice: */
 	if (group->group_weight == 1)
 		return cpumask_first(sched_group_span(group));
 
 	/* Traverse only the allowed CPUs */
-	for_each_cpu_and(i, sched_group_span(group), p->cpus_ptr) {
+	for_each_cpu_and(i, sched_group_span(group), allowed) {
 		struct rq *rq = cpu_rq(i);
 
 		if (!sched_core_cookie_match(rq, p))
@@ -8504,12 +8511,15 @@ sched_balance_find_dst_group_cpu(struct sched_group *group, struct task_struct *
 }
 
 static inline int sched_balance_find_dst_cpu(struct sched_domain *sd, struct task_struct *p,
-				  int cpu, int prev_cpu, int sd_flag)
+				  int cpu, int prev_cpu, int sd_flag,
+				  const struct cpumask *cpus_allowed)
 {
-	int new_cpu = cpu;
+	const struct cpumask *allowed = cpus_allowed ?: p->cpus_ptr;
+	int new_cpu = !cpus_allowed || cpumask_test_cpu(cpu, allowed) ?
+			cpu : cpumask_any_distribute(allowed);
 
-	if (!cpumask_intersects(sched_domain_span(sd), p->cpus_ptr))
-		return prev_cpu;
+	if (!cpumask_intersects(sched_domain_span(sd), allowed))
+		return cpus_allowed ? new_cpu : prev_cpu;
 
 	/*
 	 * We need task's util for cpu_util_without, sync it up to
@@ -8528,13 +8538,13 @@ static inline int sched_balance_find_dst_cpu(struct sched_domain *sd, struct tas
 			continue;
 		}
 
-		group = sched_balance_find_dst_group(sd, p, cpu);
+		group = sched_balance_find_dst_group(sd, p, cpu, cpus_allowed);
 		if (!group) {
 			sd = sd->child;
 			continue;
 		}
 
-		new_cpu = sched_balance_find_dst_group_cpu(group, p, cpu);
+		new_cpu = sched_balance_find_dst_group_cpu(group, p, cpu, cpus_allowed);
 		if (new_cpu == cpu) {
 			/* Now try balancing at a lower domain level of 'cpu': */
 			sd = sd->child;
@@ -8654,11 +8664,12 @@ static int select_idle_core(struct task_struct *p, int core, struct cpumask *cpu
 /*
  * Scan the local SMT mask for idle CPUs.
  */
-static int select_idle_smt(struct task_struct *p, struct sched_domain *sd, int target)
+static int select_idle_smt(struct task_struct *p, struct sched_domain *sd,
+			   int target, const struct cpumask *cpus_allowed)
 {
 	int cpu;
 
-	for_each_cpu_and(cpu, cpu_smt_mask(target), p->cpus_ptr) {
+	for_each_cpu_and(cpu, cpu_smt_mask(target), cpus_allowed) {
 		if (cpu == target)
 			continue;
 		/*
@@ -8679,7 +8690,8 @@ static int select_idle_smt(struct task_struct *p, struct sched_domain *sd, int t
  * comparing the average scan cost (tracked in sd->avg_scan_cost) against the
  * average idle time for this rq (as found in rq->avg_idle).
  */
-static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool has_idle_core, int target)
+static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool has_idle_core,
+			   int target, const struct cpumask *cpus_allowed)
 {
 	struct cpumask *cpus = this_cpu_cpumask_var_ptr(select_rq_mask);
 	int i, cpu, idle_cpu = -1, nr = INT_MAX;
@@ -8700,7 +8712,7 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool 
 			return -1;
 	}
 
-	if (!cpumask_and(cpus, sched_domain_span(sd), p->cpus_ptr))
+	if (!cpumask_and(cpus, sched_domain_span(sd), cpus_allowed))
 		return -1;
 
 	if (static_branch_unlikely(&sched_cluster_active)) {
@@ -8802,7 +8814,8 @@ enum asym_fits_state {
  * maximize capacity.
  */
 static int
-select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target)
+select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target,
+		     const struct cpumask *cpus_allowed)
 {
 	/*
 	 * On !SMT systems, has_idle_core is always false and preferred_core
@@ -8817,7 +8830,7 @@ select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target)
 	int nr = INT_MAX;
 
 	cpus = this_cpu_cpumask_var_ptr(select_rq_mask);
-	cpumask_and(cpus, sched_domain_span(sd), p->cpus_ptr);
+	cpumask_and(cpus, sched_domain_span(sd), cpus_allowed);
 
 	task_util = task_util_est(p);
 	util_min = uclamp_eff_value(p, UCLAMP_MIN);
@@ -8946,8 +8959,10 @@ static inline bool asym_fits_cpu(unsigned long util,
 /*
  * Try and locate an idle core/thread in the LLC cache domain.
  */
-static int select_idle_sibling(struct task_struct *p, int prev, int target)
+static int select_idle_sibling(struct task_struct *p, int prev, int target,
+			       const struct cpumask *cpus_allowed)
 {
+	const struct cpumask *allowed = cpus_allowed ?: p->cpus_ptr;
 	bool has_idle_core = false;
 	struct sched_domain *sd;
 	unsigned long task_util, util_min, util_max;
@@ -8977,6 +8992,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	 * If the previous CPU is cache affine and idle, don't be stupid:
 	 */
 	if (prev != target && cpus_share_cache(prev, target) &&
+	    (!cpus_allowed || cpumask_test_cpu(prev, allowed)) &&
 	    choose_idle_cpu(prev, p) &&
 	    asym_fits_cpu(task_util, util_min, util_max, prev)) {
 
@@ -8999,6 +9015,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	    in_task() &&
 	    prev == smp_processor_id() &&
 	    this_rq()->nr_running <= 1 &&
+	    (!cpus_allowed || cpumask_test_cpu(prev, allowed)) &&
 	    asym_fits_cpu(task_util, util_min, util_max, prev)) {
 		return prev;
 	}
@@ -9010,7 +9027,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	    recent_used_cpu != target &&
 	    cpus_share_cache(recent_used_cpu, target) &&
 	    choose_idle_cpu(recent_used_cpu, p) &&
-	    cpumask_test_cpu(recent_used_cpu, p->cpus_ptr) &&
+	    cpumask_test_cpu(recent_used_cpu, allowed) &&
 	    asym_fits_cpu(task_util, util_min, util_max, recent_used_cpu)) {
 
 		if (!static_branch_unlikely(&sched_cluster_active) ||
@@ -9036,7 +9053,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 		 * capacity path.
 		 */
 		if (sd) {
-			i = select_idle_capacity(p, sd, target);
+			i = select_idle_capacity(p, sd, target, allowed);
 			return ((unsigned)i < nr_cpumask_bits) ? i : target;
 		}
 	}
@@ -9049,13 +9066,13 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 		has_idle_core = test_idle_cores(target);
 
 		if (!has_idle_core && cpus_share_cache(prev, target)) {
-			i = select_idle_smt(p, sd, prev);
+			i = select_idle_smt(p, sd, prev, allowed);
 			if ((unsigned int)i < nr_cpumask_bits)
 				return i;
 		}
 	}
 
-	i = select_idle_cpu(p, sd, has_idle_core, target);
+	i = select_idle_cpu(p, sd, has_idle_core, target, allowed);
 	if ((unsigned)i < nr_cpumask_bits)
 		return i;
 
@@ -9501,8 +9518,10 @@ compute_energy(struct energy_env *eenv, struct perf_domain *pd,
  * other use-cases too. So, until someone finds a better way to solve this,
  * let's keep things simple by re-using the existing slow path.
  */
-static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu)
+static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu,
+				     const struct cpumask *cpus_allowed)
 {
+	const struct cpumask *allowed = cpus_allowed ?: p->cpus_ptr;
 	struct cpumask *cpus = this_cpu_cpumask_var_ptr(select_rq_mask);
 	unsigned long prev_delta = ULONG_MAX, best_delta = ULONG_MAX;
 	unsigned long p_util_min = uclamp_is_used() ? uclamp_eff_value(p, UCLAMP_MIN) : 0;
@@ -9530,7 +9549,8 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu)
 	if (!sd)
 		return target;
 
-	target = prev_cpu;
+	target = !cpus_allowed || cpumask_test_cpu(prev_cpu, allowed) ?
+			prev_cpu : cpumask_any_distribute(allowed);
 
 	sync_entity_load_avg(&p->se);
 	if (!task_util_est(p) && p_util_min == 0)
@@ -9565,7 +9585,7 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu)
 			if (!cpumask_test_cpu(cpu, sched_domain_span(sd)))
 				continue;
 
-			if (!cpumask_test_cpu(cpu, p->cpus_ptr))
+			if (!cpumask_test_cpu(cpu, allowed))
 				continue;
 
 			util = cpu_util(cpu, p, cpu, 0);
@@ -9680,22 +9700,25 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu)
 }
 
 /*
- * select_task_rq_fair: Select target runqueue for the waking task in domains
- * that have the relevant SD flag set. In practice, this is SD_BALANCE_WAKE,
- * SD_BALANCE_FORK, or SD_BALANCE_EXEC.
+ * select_task_rq_fair_mask: Select a target runqueue for the waking task from
+ * @cpus_allowed in domains that have the relevant SD flag set. If
+ * @cpus_allowed is NULL, use the task's affinity mask. In practice, this is
+ * SD_BALANCE_WAKE, SD_BALANCE_FORK, or SD_BALANCE_EXEC.
+ * A non-NULL @cpus_allowed must be non-empty and a subset of p->cpus_ptr.
  *
  * Balances load by selecting the idlest CPU in the idlest group, or under
  * certain conditions an idle sibling CPU if the domain has SD_WAKE_AFFINE set.
  *
  * Returns the target CPU number.
  */
-static int
-select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
+int select_task_rq_fair_mask(struct task_struct *p, int prev_cpu, int wake_flags,
+			     const struct cpumask *cpus_allowed)
 {
+	const struct cpumask *allowed = cpus_allowed ?: p->cpus_ptr;
 	int sync = (wake_flags & WF_SYNC) && !(current->flags & PF_EXITING);
 	struct sched_domain *tmp, *sd = NULL;
 	int cpu = smp_processor_id();
-	int new_cpu = prev_cpu;
+	int new_cpu;
 	int want_affine = 0;
 	/* SD_flags and WF_flags share the first nibble */
 	int sd_flag = wake_flags & 0xF;
@@ -9704,21 +9727,27 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 	 * required for stable ->cpus_allowed
 	 */
 	lockdep_assert_held(&p->pi_lock);
+
+	new_cpu = !cpus_allowed || cpumask_test_cpu(prev_cpu, allowed) ?
+			prev_cpu : cpumask_any_distribute(allowed);
+
 	if (wake_flags & WF_TTWU) {
 		record_wakee(p);
 
 		if ((wake_flags & WF_CURRENT_CPU) &&
-		    cpumask_test_cpu(cpu, p->cpus_ptr))
+		    cpumask_test_cpu(cpu, allowed))
 			return cpu;
 
 		if (!is_rd_overutilized(this_rq()->rd)) {
-			new_cpu = find_energy_efficient_cpu(p, prev_cpu);
+			new_cpu = find_energy_efficient_cpu(p, prev_cpu, cpus_allowed);
 			if (new_cpu >= 0)
 				return new_cpu;
-			new_cpu = prev_cpu;
+			new_cpu = !cpus_allowed || cpumask_test_cpu(prev_cpu, allowed) ?
+					prev_cpu : cpumask_any_distribute(allowed);
 		}
 
-		want_affine = !wake_wide(p) && cpumask_test_cpu(cpu, p->cpus_ptr);
+		want_affine = !wake_wide(p) && cpumask_test_cpu(cpu, allowed) &&
+			      (!cpus_allowed || cpumask_test_cpu(prev_cpu, allowed));
 	}
 
 	for_each_domain(cpu, tmp) {
@@ -9748,13 +9777,20 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 
 	/* Slow path */
 	if (unlikely(sd))
-		return sched_balance_find_dst_cpu(sd, p, cpu, prev_cpu, sd_flag);
+		return sched_balance_find_dst_cpu(sd, p, cpu, prev_cpu, sd_flag,
+						   cpus_allowed);
 
 	/* Fast path */
 	if (wake_flags & WF_TTWU)
-		return select_idle_sibling(p, prev_cpu, new_cpu);
+		return select_idle_sibling(p, prev_cpu, new_cpu, cpus_allowed);
 
 	return new_cpu;
+}
+
+static int
+select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
+{
+	return select_task_rq_fair_mask(p, prev_cpu, wake_flags, NULL);
 }
 
 /*
@@ -12290,7 +12326,8 @@ static int idle_cpu_without(int cpu, struct task_struct *p)
 static inline void update_sg_wakeup_stats(struct sched_domain *sd,
 					  struct sched_group *group,
 					  struct sg_lb_stats *sgs,
-					  struct task_struct *p)
+					  struct task_struct *p,
+					  const struct cpumask *cpus_allowed)
 {
 	int i, nr_running;
 
@@ -12300,7 +12337,7 @@ static inline void update_sg_wakeup_stats(struct sched_domain *sd,
 	if (sd->flags & SD_ASYM_CPUCAPACITY)
 		sgs->group_misfit_task_load = 1;
 
-	for_each_cpu_and(i, sched_group_span(group), p->cpus_ptr) {
+	for_each_cpu_and(i, sched_group_span(group), cpus_allowed) {
 		struct rq *rq = cpu_rq(i);
 		unsigned int local;
 
@@ -12403,8 +12440,10 @@ static bool update_pick_idlest(struct sched_group *idlest,
  * Assumes p is allowed on at least one CPU in sd.
  */
 static struct sched_group *
-sched_balance_find_dst_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
+sched_balance_find_dst_group(struct sched_domain *sd, struct task_struct *p, int this_cpu,
+			     const struct cpumask *cpus_allowed)
 {
+	const struct cpumask *allowed = cpus_allowed ?: p->cpus_ptr;
 	struct sched_group *idlest = NULL, *local = NULL, *group = sd->groups;
 	struct sg_lb_stats local_sgs, tmp_sgs;
 	struct sg_lb_stats *sgs;
@@ -12419,7 +12458,7 @@ sched_balance_find_dst_group(struct sched_domain *sd, struct task_struct *p, int
 
 		/* Skip over this group if it has no CPUs allowed */
 		if (!cpumask_intersects(sched_group_span(group),
-					p->cpus_ptr))
+					allowed))
 			continue;
 
 		/* Skip over this group if no cookie matched */
@@ -12436,7 +12475,7 @@ sched_balance_find_dst_group(struct sched_domain *sd, struct task_struct *p, int
 			sgs = &tmp_sgs;
 		}
 
-		update_sg_wakeup_stats(sd, group, sgs, p);
+		update_sg_wakeup_stats(sd, group, sgs, p, allowed);
 
 		if (!local_group && update_pick_idlest(idlest, &idlest_sgs, group, sgs)) {
 			idlest = group;
@@ -12539,8 +12578,8 @@ sched_balance_find_dst_group(struct sched_domain *sd, struct task_struct *p, int
 			 * real need of migration, periodic load balance will
 			 * take care of it.
 			 */
-			if (p->nr_cpus_allowed != NR_CPUS) {
-				unsigned int w = cpumask_weight_and(p->cpus_ptr,
+			if (cpus_allowed || p->nr_cpus_allowed != NR_CPUS) {
+				unsigned int w = cpumask_weight_and(allowed,
 								sched_group_span(local));
 				imb_numa_nr = min(w, sd->imb_numa_nr);
 			}
