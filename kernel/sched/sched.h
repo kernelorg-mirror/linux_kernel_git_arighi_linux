@@ -2832,6 +2832,8 @@ extern const struct sched_class stop_sched_class;
 extern const struct sched_class dl_sched_class;
 extern const struct sched_class rt_sched_class;
 extern const struct sched_class fair_sched_class;
+extern int select_task_rq_fair_mask(struct task_struct *p, int prev_cpu, int wake_flags,
+				    const struct cpumask *cpus_allowed);
 extern const struct sched_class idle_sched_class;
 
 /*
