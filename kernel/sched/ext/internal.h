@@ -1005,6 +1005,14 @@ struct sched_ext_ops {
 			       u64 wake_flags);
 
 	/**
+	 * @fair_select_vlag: Select virtual lag at placement or request renewal
+	 * @p: task whose virtual lag is being selected
+	 * @ctx: fair scheduler's proposed virtual lag and accepted range
+	 */
+	s64 (*fair_select_vlag)(struct task_struct *p,
+			const struct fair_ext_vlag_ctx *ctx);
+
+	/**
 	 * @fair_balance: Run a custom fair load-balancing pass
 	 * @ctx: minimal state for the CPU requesting balance
 	 */

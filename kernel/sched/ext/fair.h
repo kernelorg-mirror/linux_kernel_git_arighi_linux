@@ -4,6 +4,7 @@
 
 struct bpf_link;
 struct fair_ext_balance_ctx;
+struct fair_ext_vlag_ctx;
 struct sched_ext_ops;
 struct task_struct;
 
@@ -15,6 +16,8 @@ int __init scx_fair_init(void);
 
 s32 sched_ext_ops__fair_select_cpu(struct task_struct *p, s32 prev_cpu,
 				   u64 wake_flags);
+s64 sched_ext_ops__fair_select_vlag(struct task_struct *p,
+				    const struct fair_ext_vlag_ctx *ctx);
 s32 sched_ext_ops__fair_balance(const struct fair_ext_balance_ctx *ctx);
 
 #endif /* _KERNEL_SCHED_EXT_FAIR_H */

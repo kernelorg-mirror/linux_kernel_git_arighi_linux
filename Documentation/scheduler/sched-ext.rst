@@ -540,14 +540,16 @@ Extending fair scheduling
 ``sched_ext_ops`` allows a BPF struct_ops program to extend selected operations
 of the fair scheduling class without replacing it. It requires
 ``CONFIG_SCHED_CLASS_EXT`` and the ``SCX_OPS_FAIR`` flag. The interface
-supports overriding initial CPU placement and load balancing for fair-class
-tasks.
+supports overriding initial CPU placement, virtual-lag selection, and load
+balancing for fair-class tasks.
 
-The interface has two optional operations::
+The interface has three optional operations::
 
     struct sched_ext_ops {
             s32 (*fair_select_cpu)(struct task_struct *p, s32 prev_cpu,
                                    u64 wake_flags);
+            s64 (*fair_select_vlag)(struct task_struct *p,
+                                    const struct fair_ext_vlag_ctx *ctx);
             s32 (*fair_balance)(const struct fair_ext_balance_ctx *ctx);
             u64 flags; /* SCX_OPS_FAIR */
             u32 timeout_ms;
@@ -584,6 +586,37 @@ The struct_ops map ID of the attached policy is available in
 ``/sys/kernel/fair_ext/map_id``. It contains zero when no policy is attached
 and can otherwise be correlated with ``bpftool link show`` and
 ``bpftool struct_ops show``.
+
+Virtual-lag selection
+---------------------
+
+``fair_select_vlag()`` runs when fair places a task entity on a runqueue and
+when a running task consumes or yields its current request. The callback
+receives fair's proposal in relative form::
+
+    struct fair_ext_vlag_ctx {
+            s64 vlag;
+            s64 vlag_min;
+            s64 vlag_max;
+            u64 flags;
+    };
+
+``vlag`` is the runqueue average vruntime minus the task's vruntime. The task's
+request duration remains available as ``p->se.slice``.
+``vlag_min`` and ``vlag_max`` describe the virtual-lag bounds fair will accept
+for an override.
+``FAIR_EXT_VLAG_PLACE``, ``FAIR_EXT_VLAG_INITIAL``,
+``FAIR_EXT_VLAG_WAKEUP``, ``FAIR_EXT_VLAG_MIGRATED``,
+``FAIR_EXT_VLAG_RENEW``, and ``FAIR_EXT_VLAG_YIELD`` describe why the state
+is being updated.
+
+The callback returns the virtual lag to use. Returning ``ctx->vlag`` retains
+fair's proposal. Values outside the advertised bounds also retain fair's
+proposal. The virtual slice remains under fair's control.
+
+Only task entities are exposed. Runtime accounting, group scheduling,
+reweighting, eligibility checks, and the EEVDF runqueue remain controlled by
+the fair scheduler.
 
 Fair placement within a CPU subset
 ----------------------------------

@@ -57,10 +57,13 @@ static DEFINE_PER_CPU(cpumask_var_t, fair_ext_preferred_mask);
 
 DEFINE_STATIC_CALL(fair_ext_select_cpu_call,
 		   sched_ext_ops__fair_select_cpu);
+DEFINE_STATIC_CALL(fair_ext_select_vlag_call,
+		   sched_ext_ops__fair_select_vlag);
 DEFINE_STATIC_CALL(fair_ext_balance_call, sched_ext_ops__fair_balance);
 
 /* Keep each fair extension hook patched out until it is registered. */
 DEFINE_STATIC_KEY_FALSE(__fair_ext_select_cpu_enabled);
+DEFINE_STATIC_KEY_FALSE(__fair_ext_select_vlag_enabled);
 DEFINE_STATIC_KEY_FALSE(__fair_ext_balance_enabled);
 
 static void fair_ext_disable_callbacks(struct sched_ext_ops *ops);
@@ -125,6 +128,33 @@ int fair_ext_select_cpu(struct task_struct *p, int prev_cpu, int wake_flags)
 	ctx->p = NULL;
 
 	return cpu;
+}
+
+bool fair_ext_select_vlag(struct cfs_rq *cfs_rq, struct sched_entity *se,
+			  u64 flags, s64 *vlag)
+{
+	struct fair_ext_vlag_ctx state = {
+		.vlag		= *vlag,
+		.flags		= flags,
+	};
+	struct task_struct *p;
+	s64 new_vlag;
+
+	if (!entity_is_task(se))
+		return false;
+
+	p = task_of(se);
+	lockdep_assert_rq_held(task_rq(p));
+	lockdep_assert_preemption_disabled();
+	fair_ext_init_vlag_bounds(cfs_rq, se, &state);
+
+	guard(rcu)();
+	new_vlag = static_call(fair_ext_select_vlag_call)(p, &state);
+	if (new_vlag < state.vlag_min || new_vlag > state.vlag_max)
+		return false;
+
+	*vlag = new_vlag;
+	return true;
 }
 
 bool fair_ext_balance(int cpu, u32 nr_running, u64 flags)
@@ -453,6 +483,11 @@ static void fair_ext_enable_callbacks(struct sched_ext_ops *ops)
 				   ops->fair_select_cpu);
 		static_branch_enable(&__fair_ext_select_cpu_enabled);
 	}
+	if (ops->fair_select_vlag) {
+		static_call_update(fair_ext_select_vlag_call,
+				   ops->fair_select_vlag);
+		static_branch_enable(&__fair_ext_select_vlag_enabled);
+	}
 	if (ops->fair_balance) {
 		static_call_update(fair_ext_balance_call, ops->fair_balance);
 		static_branch_enable(&__fair_ext_balance_enabled);
@@ -465,6 +500,11 @@ static void fair_ext_disable_callbacks(struct sched_ext_ops *ops)
 		static_branch_disable(&__fair_ext_select_cpu_enabled);
 		static_call_update(fair_ext_select_cpu_call,
 				   sched_ext_ops__fair_select_cpu);
+	}
+	if (ops->fair_select_vlag) {
+		static_branch_disable(&__fair_ext_select_vlag_enabled);
+		static_call_update(fair_ext_select_vlag_call,
+				   sched_ext_ops__fair_select_vlag);
 	}
 	if (ops->fair_balance) {
 		static_branch_disable(&__fair_ext_balance_enabled);
@@ -541,7 +581,8 @@ int scx_fair_validate(struct sched_ext_ops *ops)
 {
 	void (**regular_op)(void) = (void *)ops;
 	bool fair_mode = ops->flags & SCX_OPS_FAIR;
-	bool has_fair = ops->fair_select_cpu || ops->fair_balance;
+	bool has_fair = ops->fair_select_cpu || ops->fair_select_vlag ||
+			ops->fair_balance;
 	int nr_regular_ops = SCX_MOFF_IDX(offsetof(struct sched_ext_ops,
 						dispatch_max_batch));
 	int i;
@@ -570,6 +611,12 @@ s32 sched_ext_ops__fair_select_cpu(struct task_struct *p, s32 prev_cpu,
 				   u64 wake_flags)
 {
 	return -1;
+}
+
+s64 sched_ext_ops__fair_select_vlag(struct task_struct *p,
+				    const struct fair_ext_vlag_ctx *ctx)
+{
+	return ctx->vlag;
 }
 
 s32 sched_ext_ops__fair_balance(const struct fair_ext_balance_ctx *ctx)

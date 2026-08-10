@@ -1917,22 +1917,40 @@ static inline void scx_rq_clock_invalidate(struct rq *rq) {}
 #endif /* !CONFIG_SCHED_CLASS_EXT */
 
 #ifdef CONFIG_SCHED_CLASS_EXT
+struct fair_ext_vlag_ctx;
+
 DECLARE_STATIC_KEY_FALSE(__fair_ext_select_cpu_enabled);
+DECLARE_STATIC_KEY_FALSE(__fair_ext_select_vlag_enabled);
 DECLARE_STATIC_KEY_FALSE(__fair_ext_balance_enabled);
 
 #define fair_ext_select_cpu_enabled() \
 	static_branch_unlikely(&__fair_ext_select_cpu_enabled)
+#define fair_ext_select_vlag_enabled() \
+	static_branch_unlikely(&__fair_ext_select_vlag_enabled)
 #define fair_ext_balance_enabled() \
 	static_branch_unlikely(&__fair_ext_balance_enabled)
 int fair_ext_select_cpu(struct task_struct *p, int prev_cpu, int wake_flags);
+void fair_ext_init_vlag_bounds(struct cfs_rq *cfs_rq,
+			       struct sched_entity *se,
+			       struct fair_ext_vlag_ctx *state);
+bool fair_ext_select_vlag(struct cfs_rq *cfs_rq, struct sched_entity *se,
+			  u64 flags, s64 *vlag);
 bool fair_ext_balance(int cpu, u32 nr_running, u64 flags);
 #else
 #define fair_ext_select_cpu_enabled() false
+#define fair_ext_select_vlag_enabled() false
 #define fair_ext_balance_enabled() false
 static inline int fair_ext_select_cpu(struct task_struct *p, int prev_cpu,
 				      int wake_flags)
 {
 	return -1;
+}
+
+static inline bool fair_ext_select_vlag(struct cfs_rq *cfs_rq,
+					struct sched_entity *se, u64 flags,
+					s64 *vlag)
+{
+	return false;
 }
 
 static inline bool fair_ext_balance(int cpu, u32 nr_running, u64 flags)

@@ -871,6 +871,24 @@ static s64 entity_lag(struct cfs_rq *cfs_rq, struct sched_entity *se, u64 avrunt
 	return clamp(vlag, -limit, limit);
 }
 
+#ifdef CONFIG_SCHED_CLASS_EXT
+void fair_ext_init_vlag_bounds(struct cfs_rq *cfs_rq, struct sched_entity *se,
+			       struct fair_ext_vlag_ctx *state)
+{
+	u64 max_slice;
+	s64 lag_limit;
+
+	/*
+	 * Match the virtual-lag range used by entity_lag(): the largest request
+	 * on the runqueue plus one tick of scheduling granularity.
+	 */
+	max_slice = cfs_rq_max_slice(cfs_rq) + TICK_NSEC;
+	lag_limit = calc_delta_fair(max_slice, se);
+	state->vlag_min = -lag_limit;
+	state->vlag_max = lag_limit;
+}
+#endif
+
 /*
  * Delayed dequeue aims to reduce the negative lag of a dequeued task. While
  * updating the lag of an entity, check that negative lag didn't increase
@@ -1277,7 +1295,7 @@ static void clear_buddies(struct cfs_rq *cfs_rq, struct sched_entity *se);
  * XXX: strictly: vd_i += N*r_i/w_i such that: vd_i > ve_i
  * this is probably good enough.
  */
-static bool update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static bool update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se, u64 flags)
 {
 	if (vruntime_cmp(se->vruntime, "<", se->deadline))
 		return false;
@@ -1293,8 +1311,22 @@ static bool update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	/*
 	 * EEVDF: vd_i = ve_i + r_i / w_i
 	 */
-	se->deadline = se->vruntime + calc_delta_fair(se->slice, se);
-	avg_vruntime(cfs_rq);
+	if (!fair_ext_select_vlag_enabled()) {
+		se->deadline = se->vruntime + calc_delta_fair(se->slice, se);
+		avg_vruntime(cfs_rq);
+	} else {
+		u64 avruntime, vslice;
+		s64 vlag;
+
+		vslice = calc_delta_fair(se->slice, se);
+		avruntime = avg_vruntime(cfs_rq);
+		vlag = avruntime - se->vruntime;
+
+		if (fair_ext_select_vlag(cfs_rq, se, flags, &vlag))
+			se->vruntime = avruntime - vlag;
+
+		se->deadline = se->vruntime + vslice;
+	}
 
 	/*
 	 * The task has consumed its request, reschedule.
@@ -2051,7 +2083,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	cfs_rq = &rq->cfs;
 
 	curr->vruntime += calc_delta_fair(delta_exec, curr);
-	resched = update_deadline(cfs_rq, curr);
+	resched = update_deadline(cfs_rq, curr, FAIR_EXT_VLAG_RENEW);
 
 	/*
 	 * If the fair_server is active, we need to account for the
@@ -6291,6 +6323,19 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 			update_zero = true;
 	}
 
+	if (fair_ext_select_vlag_enabled()) {
+		u64 vlag_flags = FAIR_EXT_VLAG_PLACE;
+
+		if (flags & ENQUEUE_INITIAL)
+			vlag_flags |= FAIR_EXT_VLAG_INITIAL;
+		if (flags & ENQUEUE_WAKEUP)
+			vlag_flags |= FAIR_EXT_VLAG_WAKEUP;
+		if (flags & ENQUEUE_MIGRATED)
+			vlag_flags |= FAIR_EXT_VLAG_MIGRATED;
+
+		fair_ext_select_vlag(cfs_rq, se, vlag_flags, &lag);
+	}
+
 	se->vruntime = vruntime - lag;
 
 	if (update_zero)
@@ -10223,7 +10268,7 @@ static void yield_task_fair(struct rq *rq)
 	 */
 	if (entity_eligible(cfs_rq, se)) {
 		se->vruntime = se->deadline;
-		update_deadline(cfs_rq, se);
+		update_deadline(cfs_rq, se, FAIR_EXT_VLAG_RENEW | FAIR_EXT_VLAG_YIELD);
 	}
 }
 

@@ -7930,6 +7930,7 @@ static const struct btf_type *task_struct_type;
 static bool bpf_scx_is_fair_member(u32 moff)
 {
 	return moff == offsetof(struct sched_ext_ops, fair_select_cpu) ||
+	       moff == offsetof(struct sched_ext_ops, fair_select_vlag) ||
 	       moff == offsetof(struct sched_ext_ops, fair_balance);
 }
 
@@ -8317,6 +8318,7 @@ static struct sched_ext_ops __bpf_ops_sched_ext_ops = {
 	.dump_cpu		= sched_ext_ops__dump_cpu,
 	.dump_task		= sched_ext_ops__dump_task,
 	.fair_select_cpu	= sched_ext_ops__fair_select_cpu,
+	.fair_select_vlag	= sched_ext_ops__fair_select_vlag,
 	.fair_balance		= sched_ext_ops__fair_balance,
 };
 
