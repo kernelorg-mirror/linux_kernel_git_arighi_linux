@@ -197,6 +197,72 @@ Similar to scx_simple, in limited scenarios, this scheduler can perform
 reasonably well on single socket-socket systems with a unified L3 cache and show
 significantly lowered hierarchical scheduling overhead.
 
+## scx_fair_tiered
+
+A policy which extends fair scheduling through `sched_ext_ops` and
+`SCX_OPS_FAIR` without replacing the scheduling class. It accepts a
+Linux CPU-list expression and treats that subset as a soft CPU preference:
+
+```shell
+sudo build/bin/scx_fair_tiered -c 0-3,8
+```
+
+The BPF policy calls `scx_fair_bpf_select_cpu()` with the configured mask, so
+the native fair selector makes topology and load decisions within the preferred
+subset. If the selected CPU is busy, placement falls back to the task's full
+effective affinity mask. The `fair_balance()` callback prevents non-preferred
+CPUs from pulling work while the preferred mask has idle capacity and otherwise
+allows native fair balancing to continue.
+
+## scx_fair_vlag
+
+A focused fair-extension policy which implements only `fair_select_vlag()`:
+
+```shell
+sudo build/bin/scx_fair_vlag
+```
+
+It selects zero virtual lag when fair places a task, forgiving prior service
+debt and making the task immediately eligible.
+
+## scx_fair_nvcsw
+
+A fair-extension policy which favors tasks with high voluntary context-switch
+rates:
+
+```shell
+sudo build/bin/scx_fair_nvcsw
+```
+
+The policy evaluates each task's voluntary context-switch rate from its `nvcsw`
+counter, measured over short time windows, and uses that rate to scale the
+virtual lag proposed by fair when the task is placed on wakeup.
+
+Tasks with negative virtual lag retain their native lag, so accumulated service
+debt is never amplified. For tasks with positive lag, fair's proposal is scaled
+up in proportion to the measured rate and capped at fair's maximum permitted
+virtual lag; tasks that rarely switch keep fair's proposal untouched. The boost
+is therefore proportional to the lag fair already granted: a task placed with no
+positive lag is not boosted no matter how often it blocks.
+
+Note that `nvcsw` only counts switches where the task actually blocks, so this
+heuristic favors sleep/wakeup-intensive workloads without them necessarily being
+latency-sensitive; a task spinning on `sched_yield()` never accumulates `nvcsw`
+and is not boosted.
+
+## scx_fair_noop
+
+A no-op fair-extension policy intended for measuring callback overhead:
+
+```shell
+sudo build/bin/scx_fair_noop
+```
+
+Its `fair_select_cpu()` callback requests native fair fallback,
+`fair_select_vlag()` returns fair's proposed virtual lag, and `fair_balance()`
+continues native balancing. These callbacks remain attached so benchmarks
+include fair-extension dispatch and BPF invocation costs.
+
 
 # Troubleshooting
 
