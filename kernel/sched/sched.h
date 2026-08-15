@@ -1916,6 +1916,30 @@ static inline void scx_rq_clock_update(struct rq *rq, u64 clock) {}
 static inline void scx_rq_clock_invalidate(struct rq *rq) {}
 #endif /* !CONFIG_SCHED_CLASS_EXT */
 
+#ifdef CONFIG_SCHED_CLASS_EXT
+DECLARE_STATIC_KEY_FALSE(__fair_ext_select_cpu_enabled);
+DECLARE_STATIC_KEY_FALSE(__fair_ext_balance_enabled);
+
+#define fair_ext_select_cpu_enabled() \
+	static_branch_unlikely(&__fair_ext_select_cpu_enabled)
+#define fair_ext_balance_enabled() \
+	static_branch_unlikely(&__fair_ext_balance_enabled)
+int fair_ext_select_cpu(struct task_struct *p, int prev_cpu, int wake_flags);
+bool fair_ext_balance(int cpu, u32 nr_running, u64 flags);
+#else
+#define fair_ext_select_cpu_enabled() false
+#define fair_ext_balance_enabled() false
+static inline int fair_ext_select_cpu(struct task_struct *p, int prev_cpu,
+				      int wake_flags)
+{
+	return -1;
+}
+
+static inline bool fair_ext_balance(int cpu, u32 nr_running, u64 flags)
+{
+	return false;
+}
+#endif
 static inline void assert_balance_callbacks_empty(struct rq *rq)
 {
 	WARN_ON_ONCE(IS_ENABLED(CONFIG_PROVE_LOCKING) &&

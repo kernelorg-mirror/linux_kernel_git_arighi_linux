@@ -37,6 +37,7 @@
 #include <linux/sched/clock.h>
 #include <linux/sched/cond_resched.h>
 #include <linux/sched/cputime.h>
+#include <linux/sched/fair_ext.h>
 #include <linux/sched/isolation.h>
 #include <linux/sched/nohz.h>
 #include <linux/sched/prio.h>
@@ -9790,6 +9791,14 @@ int select_task_rq_fair_mask(struct task_struct *p, int prev_cpu, int wake_flags
 static int
 select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 {
+	int cpu;
+
+	if (fair_ext_select_cpu_enabled()) {
+		cpu = fair_ext_select_cpu(p, prev_cpu, wake_flags);
+		if (cpu >= 0 && cpu < nr_cpu_ids && task_allowed_on_cpu(p, cpu))
+			return cpu;
+	}
+
 	return select_task_rq_fair_mask(p, prev_cpu, wake_flags, NULL);
 }
 
@@ -13967,6 +13976,9 @@ static void sched_balance_domains(struct rq *rq, enum cpu_idle_type idle)
 	int continue_balancing = 1;
 	int cpu = rq->cpu;
 	int busy = idle != CPU_IDLE && !sched_idle_rq(rq);
+	bool fair_ext_called = false;
+	bool fair_ext_handled = false;
+	u64 fair_ext_flags = 0;
 	unsigned long interval;
 	struct sched_domain *sd;
 	/* Earliest time when we have to do rebalance again */
@@ -13974,6 +13986,12 @@ static void sched_balance_domains(struct rq *rq, enum cpu_idle_type idle)
 	int update_next_balance = 0;
 	int need_decay = 0;
 	u64 max_cost = 0;
+
+	if (idle == CPU_IDLE)
+		fair_ext_flags |= FAIR_EXT_BALANCE_IDLE;
+	else if (idle == CPU_NEWLY_IDLE)
+		fair_ext_flags |= FAIR_EXT_BALANCE_IDLE |
+				  FAIR_EXT_BALANCE_NEWLY_IDLE;
 
 	rcu_read_lock();
 	for_each_domain(cpu, sd) {
@@ -13997,7 +14015,15 @@ static void sched_balance_domains(struct rq *rq, enum cpu_idle_type idle)
 
 		interval = get_sd_balance_interval(sd, busy);
 		if (time_after_eq(jiffies, sd->last_balance + interval)) {
-			if (sched_balance_rq(cpu, rq, sd, idle, &continue_balancing)) {
+			if (!fair_ext_called && fair_ext_balance_enabled()) {
+				u32 nr_running = READ_ONCE(rq->cfs.h_nr_runnable);
+
+				fair_ext_called = true;
+				fair_ext_handled = fair_ext_balance(cpu, nr_running,
+								    fair_ext_flags);
+			}
+			if (!fair_ext_handled &&
+			    sched_balance_rq(cpu, rq, sd, idle, &continue_balancing)) {
 				/*
 				 * The LBF_DST_PINNED logic could have changed
 				 * env->dst_cpu, so we can't know our idle
@@ -14584,6 +14610,7 @@ static int sched_balance_newidle(struct rq *this_rq, struct rq_flags *rf)
 	u64 t0, t1, curr_cost = 0;
 	struct sched_domain *sd;
 	int pulled_task = 0;
+	bool fair_ext_handled = false;
 
 	update_misfit_status(NULL, this_rq);
 
@@ -14637,6 +14664,13 @@ static int sched_balance_newidle(struct rq *this_rq, struct rq_flags *rf)
 	rq_modified_begin(this_rq, &fair_sched_class);
 	raw_spin_rq_unlock(this_rq);
 
+	if (fair_ext_balance_enabled()) {
+		u32 nr_running = READ_ONCE(this_rq->cfs.h_nr_runnable);
+		u64 flags = FAIR_EXT_BALANCE_IDLE | FAIR_EXT_BALANCE_NEWLY_IDLE;
+
+		fair_ext_handled = fair_ext_balance(this_cpu, nr_running, flags);
+	}
+
 	for_each_domain(this_cpu, sd) {
 		u64 domain_cost;
 
@@ -14645,7 +14679,7 @@ static int sched_balance_newidle(struct rq *this_rq, struct rq_flags *rf)
 		if (this_rq->avg_idle < curr_cost + sd->max_newidle_lb_cost)
 			break;
 
-		if (sd->flags & SD_BALANCE_NEWIDLE) {
+		if (!fair_ext_handled && (sd->flags & SD_BALANCE_NEWIDLE)) {
 			unsigned int weight = 1;
 
 			if (sched_feat(NI_RANDOM) && sd->newidle_ratio < 1024) {

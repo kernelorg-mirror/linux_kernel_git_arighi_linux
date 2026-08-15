@@ -8,6 +8,8 @@
 #ifndef _KERNEL_SCHED_EXT_INTERNAL_H
 #define _KERNEL_SCHED_EXT_INTERNAL_H
 
+#include <linux/sched/fair_ext.h>
+
 #include "../sched.h"
 #include "types.h"
 
@@ -215,6 +217,12 @@ enum scx_ops_flags {
 	 */
 	SCX_OPS_TID_TO_TASK		= 1LLU << 8,
 
+	/*
+	 * Extend fair_sched_class without moving tasks to ext_sched_class.
+	 * Schedulers using this mode may implement only ops.fair_* methods.
+	 */
+	SCX_OPS_FAIR			= 1LLU << 9,
+
 	SCX_OPS_ALL_FLAGS		= SCX_OPS_KEEP_BUILTIN_IDLE |
 					  SCX_OPS_ENQ_LAST |
 					  SCX_OPS_ENQ_EXITING |
@@ -223,7 +231,8 @@ enum scx_ops_flags {
 					  SCX_OPS_SWITCH_PARTIAL |
 					  SCX_OPS_BUILTIN_IDLE_PER_NODE |
 					  SCX_OPS_ALWAYS_ENQ_IMMED |
-					  SCX_OPS_TID_TO_TASK,
+					  SCX_OPS_TID_TO_TASK |
+					  SCX_OPS_FAIR,
 
 	/* high 8 bits are internal, don't include in SCX_OPS_ALL_FLAGS */
 	__SCX_OPS_INTERNAL_MASK		= 0xffLLU << 56,
@@ -979,6 +988,27 @@ struct sched_ext_ops {
 
 	/* internal use only, must be NULL */
 	void __rcu *priv;
+
+	/*
+	 * Fair-extension callbacks. These are valid only with
+	 * %SCX_OPS_FAIR. In that mode, no regular sched_ext callback may
+	 * be implemented and tasks remain on fair_sched_class.
+	 */
+
+	/**
+	 * @fair_select_cpu: Pick the target CPU for a fair-class task
+	 * @p: task being placed
+	 * @prev_cpu: CPU @p was most recently associated with
+	 * @wake_flags: %FAIR_EXT_WAKE_* flags
+	 */
+	s32 (*fair_select_cpu)(struct task_struct *p, s32 prev_cpu,
+			       u64 wake_flags);
+
+	/**
+	 * @fair_balance: Run a custom fair load-balancing pass
+	 * @ctx: minimal state for the CPU requesting balance
+	 */
+	s32 (*fair_balance)(const struct fair_ext_balance_ctx *ctx);
 
 	/*
 	 * Deprecated callbacks. Kept at the end of the struct so the cid-form

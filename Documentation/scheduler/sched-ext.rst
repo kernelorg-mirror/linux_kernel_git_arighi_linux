@@ -534,6 +534,151 @@ Where to Look
     scheduling. Tasks with CPU affinity are direct-dispatched in FIFO order;
     all others are scheduled in user space by a simple vruntime scheduler.
 
+Extending fair scheduling
+=========================
+
+``sched_ext_ops`` allows a BPF struct_ops program to extend selected operations
+of the fair scheduling class without replacing it. It requires
+``CONFIG_SCHED_CLASS_EXT`` and the ``SCX_OPS_FAIR`` flag. The interface
+supports overriding initial CPU placement and load balancing for fair-class
+tasks.
+
+The interface has two optional operations::
+
+    struct sched_ext_ops {
+            s32 (*fair_select_cpu)(struct task_struct *p, s32 prev_cpu,
+                                   u64 wake_flags);
+            s32 (*fair_balance)(const struct fair_ext_balance_ctx *ctx);
+            u64 flags; /* SCX_OPS_FAIR */
+            u32 timeout_ms;
+            char name[SCX_OPS_NAME_LEN];
+    };
+
+``fair_select_cpu()`` runs for fair-class wakeup, fork, and exec placement
+while the task's ``pi_lock`` is held. A non-negative return value requests that
+CPU. A negative return value asks the kernel to use ``select_task_rq_fair()``.
+CPU numbers which are out of range, offline, or outside the task's effective
+affinity mask also fall back to ``select_task_rq_fair()``.
+
+Only one fair-extension ``sched_ext_ops`` instance may be attached at a time.
+It cannot be combined with regular sched_ext callbacks or sub-schedulers.
+Conversely, regular sched_ext policies cannot implement ``fair_*`` callbacks.
+Detaching the BPF link immediately restores the fair scheduler's default
+policy.
+
+Runtime state
+-------------
+
+The current fair_ext state is available from sysfs::
+
+    # cat /sys/kernel/fair_ext/state
+    enabled
+
+The possible states are ``disabled`` when no policy is attached and ``enabled``
+when an attached policy is active.
+
+The struct_ops map ID of the attached policy is available in
+``/sys/kernel/fair_ext/map_id``. It contains zero when no policy is attached
+and can otherwise be correlated with ``bpftool link show`` and
+``bpftool struct_ops show``.
+
+Fair placement within a CPU subset
+----------------------------------
+
+``fair_select_cpu()`` can delegate the placement decision back to the fair
+scheduler while restricting the CPUs it may consider::
+
+    s32 scx_fair_bpf_select_cpu(struct task_struct *p, s32 prev_cpu,
+                                u64 wake_flags,
+                                const struct cpumask *preferred_mask__nullable);
+
+The kfunc intersects ``preferred_mask`` with the task's effective affinity mask
+and runs normal native fair selection on the result. Passing ``NULL`` skips the
+intersection and runs fair selection directly on the task's effective affinity
+mask. A callback can query the selected CPU with::
+
+    s32 scx_fair_bpf_cpu_idle(s32 cpu);
+
+This callback-scoped kfunc returns one if the CPU is currently available idle,
+zero if it is busy, or a negative error for an invalid or inactive CPU. A soft
+preference can therefore use two selections::
+
+    cpu = scx_fair_bpf_select_cpu(p, prev_cpu, wake_flags, preferred_mask);
+    if (cpu >= 0 && scx_fair_bpf_cpu_idle(cpu) == 0)
+            cpu = scx_fair_bpf_select_cpu(p, prev_cpu, wake_flags, NULL);
+
+The task must be the task passed to the active ``fair_select_cpu()`` callback.
+The kfunc returns ``-EINVAL`` if the mask intersection is empty or ``prev_cpu``
+is invalid. Both kfuncs are only available from
+``sched_ext_ops.fair_select_cpu()`` and the mask must remain valid for the
+duration of the call. Idle state may change immediately after it is queried,
+so the preference is best effort.
+
+The preferred mask restricts this initial placement decision only. Without a
+``fair_balance()`` policy, fair load balancing may subsequently migrate the
+task to any CPU allowed by its normal affinity and cpuset constraints.
+
+Load balancing
+--------------
+
+``fair_balance()`` runs from fair's periodic, NOHZ-idle, and newly-idle load
+balancing paths. It receives only policy-relevant local state::
+
+    struct fair_ext_balance_ctx {
+            s32 cpu;
+            u32 nr_running;
+            u64 flags;
+    };
+
+``cpu`` identifies the CPU on whose behalf balancing is running and
+``nr_running`` is its number of runnable fair tasks.
+``FAIR_EXT_BALANCE_IDLE`` indicates an idle balance pass,
+and ``FAIR_EXT_BALANCE_NEWLY_IDLE`` additionally identifies the newly-idle
+path. ``cpu`` is always the destination runqueue being balanced and may
+differ from the CPU executing the callback. Internal scheduling domains,
+groups, runqueues, and load-balancer state are not exposed.
+
+A policy can inspect whether a preferred CPU subset has spare capacity with::
+
+    s32 scx_fair_bpf_has_idle_cpu(const struct cpumask *preferred_mask);
+
+The kfunc returns one if an active CPU in the mask is currently available
+idle, zero if none is, or a negative error for an invalid call. It is scoped to
+``fair_balance()`` and provides only an instantaneous capacity hint; runqueue
+and load-balancer internals remain hidden.
+
+Returning ``FAIR_EXT_BALANCE_HANDLED`` from ``fair_balance()`` suppresses
+native fair load balancing for that pass. ``FAIR_EXT_BALANCE_CONTINUE`` allows
+native balancing to continue after the callback, so the callback can augment
+fair balancing. Negative errors and unrecognized return values also fail open
+to native balancing. The callback can therefore augment fair balancing or
+replace an individual pass without manipulating runqueues directly.
+
+Scope
+-----
+
+Fair continues to control runqueue ordering, preemption, bandwidth accounting,
+and migration mechanics. A positive ``fair_balance()`` result replaces
+periodic, NOHZ, or newly-idle fair balancing for that pass, but NUMA, affinity,
+CPU-hotplug, and other scheduler mechanisms may still move a task after
+``fair_select_cpu()`` returns. A policy which requires strict placement must
+repair or otherwise account for those migrations.
+
+Example policy
+--------------
+
+``tools/sched_ext/scx_fair_tiered`` treats a command-line CPU list as a soft
+preference. It uses native fair selection within that list and falls back to
+unrestricted fair placement when the selected preferred CPU is busy. Its
+balance callback prevents non-preferred CPUs from pulling work while preferred
+idle capacity exists. Once the preferred tier is full, native fair balancing
+is allowed across all CPUs permitted by task affinity and cpuset constraints.
+
+``tools/sched_ext/scx_fair_vlag`` demonstrates virtual-lag selection
+independently. It selects zero virtual lag when fair places a task while leaving
+CPU placement, load balancing, request renewal, runtime accounting, and
+deadline sizing under native fair control.
+
 Module Parameters
 =================
 

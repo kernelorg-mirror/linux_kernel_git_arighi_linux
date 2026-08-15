@@ -7475,7 +7475,7 @@ static void scx_root_enable_workfn(struct kthread_work *work)
 
 	mutex_lock(&scx_enable_mutex);
 
-	if (scx_enable_state() != SCX_DISABLED) {
+	if (scx_enable_state() != SCX_DISABLED || scx_fair_registered()) {
 		ret = -EBUSY;
 		goto err_unlock;
 	}
@@ -7927,6 +7927,12 @@ static s32 scx_enable(struct scx_enable_cmd *cmd, struct bpf_link *link)
 
 static const struct btf_type *task_struct_type;
 
+static bool bpf_scx_is_fair_member(u32 moff)
+{
+	return moff == offsetof(struct sched_ext_ops, fair_select_cpu) ||
+	       moff == offsetof(struct sched_ext_ops, fair_balance);
+}
+
 static bool bpf_scx_is_valid_access(int off, int size,
 				    enum bpf_access_type type,
 				    const struct bpf_prog *prog,
@@ -8119,7 +8125,11 @@ static int bpf_scx_check_member(const struct btf_type *t,
 
 static int bpf_scx_reg(void *kdata, struct bpf_link *link)
 {
+	struct sched_ext_ops *ops = kdata;
 	struct scx_enable_cmd cmd = { .ops = kdata };
+
+	if (ops->flags & SCX_OPS_FAIR)
+		return scx_fair_reg(ops, link);
 
 	return scx_enable(&cmd, link);
 }
@@ -8182,6 +8192,11 @@ static void bpf_scx_unreg(void *kdata, struct bpf_link *link)
 	struct sched_ext_ops *ops = kdata;
 	struct scx_sched *sch = rcu_dereference_protected(ops->priv, true);
 
+	if (ops->flags & SCX_OPS_FAIR) {
+		scx_fair_unreg(ops, link);
+		return;
+	}
+
 	scx_disable(sch, SCX_EXIT_UNREG);
 	scx_flush_disable_work(sch);
 	RCU_INIT_POINTER(ops->priv, NULL);
@@ -8209,7 +8224,14 @@ static int bpf_scx_update(void *kdata, void *old_kdata, struct bpf_link *link)
 
 static int bpf_scx_validate(void *kdata)
 {
-	return 0;
+	return scx_fair_validate(kdata);
+}
+
+static int bpf_scx_validate_cid(void *kdata)
+{
+	struct sched_ext_ops_cid *ops = kdata;
+
+	return ops->flags & SCX_OPS_FAIR ? -EINVAL : 0;
 }
 
 static s32 sched_ext_ops__select_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags) { return -EINVAL; }
@@ -8294,6 +8316,8 @@ static struct sched_ext_ops __bpf_ops_sched_ext_ops = {
 	.dump			= sched_ext_ops__dump,
 	.dump_cpu		= sched_ext_ops__dump_cpu,
 	.dump_task		= sched_ext_ops__dump_task,
+	.fair_select_cpu	= sched_ext_ops__fair_select_cpu,
+	.fair_balance		= sched_ext_ops__fair_balance,
 };
 
 static struct bpf_struct_ops bpf_sched_ext_ops = {
@@ -8376,7 +8400,7 @@ static struct bpf_struct_ops bpf_sched_ext_ops_cid = {
 	.init_member = bpf_scx_init_member,
 	.init = bpf_scx_init,
 	.update = bpf_scx_update,
-	.validate = bpf_scx_validate,
+	.validate = bpf_scx_validate_cid,
 	.name = "sched_ext_ops_cid",
 	.owner = THIS_MODULE,
 	.cfi_stubs = &__bpf_ops_sched_ext_ops_cid
@@ -10818,7 +10842,7 @@ int scx_kfunc_context_filter(const struct bpf_prog *prog, u32 kfunc_id)
 	bool in_any = btf_id_set8_contains(&scx_kfunc_ids_any, kfunc_id);
 	bool in_cpu_only = btf_id_set8_contains(&scx_kfunc_ids_cpu_only, kfunc_id);
 	bool in_cid = btf_id_set8_contains(&scx_kfunc_ids_cid, kfunc_id);
-	u32 moff, flags;
+	u32 moff, op_idx, flags;
 
 	/* Not an SCX kfunc - allow. */
 	if (!(in_unlocked || in_init_cids || in_select_cpu || in_enqueue || in_dispatch ||
@@ -10864,12 +10888,19 @@ int scx_kfunc_context_filter(const struct bpf_prog *prog, u32 kfunc_id)
 	if (prog->aux->st_ops == &bpf_sched_ext_ops_cid && in_cpu_only)
 		return -EACCES;
 
+	moff = prog->aux->attach_st_ops_member_off;
+	if (prog->aux->st_ops == &bpf_sched_ext_ops &&
+	    bpf_scx_is_fair_member(moff))
+		return -EACCES;
+
 	/* SCX struct_ops: check the per-op allow list. */
 	if (in_any || in_idle || in_cid)
 		return 0;
 
-	moff = prog->aux->attach_st_ops_member_off;
-	flags = scx_kf_allow_flags[SCX_MOFF_IDX(moff)];
+	op_idx = SCX_MOFF_IDX(moff);
+	if (op_idx >= ARRAY_SIZE(scx_kf_allow_flags))
+		return -EACCES;
+	flags = scx_kf_allow_flags[op_idx];
 
 	if ((flags & SCX_KF_ALLOW_UNLOCKED) && in_unlocked)
 		return 0;
@@ -11005,6 +11036,13 @@ static int __init scx_init(void)
 	ret = scx_cid_kfunc_init();
 	if (ret) {
 		pr_err("sched_ext: Failed to register cid kfuncs (%d)\n", ret);
+		return ret;
+	}
+
+	ret = scx_fair_init();
+	if (ret) {
+		pr_err("sched_ext: Failed to initialize fair extensions (%d)\n",
+		       ret);
 		return ret;
 	}
 
