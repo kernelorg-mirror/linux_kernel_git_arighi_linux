@@ -36,7 +36,12 @@ enum fair_ext_wake_flags {
 static DEFINE_MUTEX(fair_ext_mutex);
 static struct sched_ext_ops __rcu *fair_ext_ops;
 static struct sched_ext_ops *fair_ext_registered_ops;
+static struct task_struct *fair_ext_watchdog_task;
+static unsigned long fair_ext_watchdog_timeout;
+static atomic_long_t fair_ext_watchdog_seq = ATOMIC_LONG_INIT(0);
 static struct kobject *fair_ext_kobj;
+
+#define FAIR_EXT_WATCHDOG_MAX_TIMEOUT	(30 * HZ)
 
 struct fair_ext_select_ctx {
 	struct task_struct *p;
@@ -66,7 +71,12 @@ static ssize_t state_show(struct kobject *kobj, struct kobj_attribute *attr,
 	const char *state;
 
 	guard(mutex)(&fair_ext_mutex);
-	state = fair_ext_registered_ops ? "enabled" : "disabled";
+	if (!fair_ext_registered_ops)
+		state = "disabled";
+	else if (rcu_access_pointer(fair_ext_ops))
+		state = "enabled";
+	else
+		state = "faulted";
 
 	return sysfs_emit(buf, "%s\n", state);
 }
@@ -140,6 +150,146 @@ bool fair_ext_balance(int cpu, u32 nr_running, u64 flags)
 	ctx->active = false;
 
 	return handled;
+}
+
+static __always_inline void
+fair_ext_watchdog_reset(struct task_struct *p, unsigned long now,
+			unsigned long seq)
+{
+	p->scx.fair_ext_watchdog.runtime = p->se.sum_exec_runtime;
+	p->scx.fair_ext_watchdog.at = now;
+	p->scx.fair_ext_watchdog.seq = seq;
+}
+
+static __always_inline bool
+fair_ext_watchdog_stalled(struct task_struct *p, unsigned long now,
+			  unsigned long timeout, unsigned long seq)
+{
+	struct fair_ext_watchdog *watchdog = &p->scx.fair_ext_watchdog;
+	u64 runtime = p->se.sum_exec_runtime;
+
+	/*
+	 * Only consecutive observations establish continuous runnable time.  A
+	 * migration can move a task behind the runqueue scan cursor and make us
+	 * miss it for one pass. Resetting the observation window in that case
+	 * deliberately favors delayed detection over a false-positive timeout.
+	 */
+	if ((watchdog->seq != seq - 1 && watchdog->seq != seq) ||
+	    watchdog->runtime != runtime) {
+		fair_ext_watchdog_reset(p, now, seq);
+		return false;
+	}
+
+	watchdog->seq = seq;
+	return time_after(now, watchdog->at + timeout);
+}
+
+struct fair_ext_watchdog_report {
+	char comm[TASK_COMM_LEN];
+	pid_t pid;
+	int cpu;
+	u32 duration_ms;
+};
+
+static bool fair_ext_watchdog_check_rq(struct rq *rq,
+				       struct fair_ext_watchdog_report *report,
+				       unsigned long seq)
+{
+	unsigned long timeout = READ_ONCE(fair_ext_watchdog_timeout);
+	unsigned long now = jiffies;
+	struct task_struct *p;
+	struct rq_flags rf;
+	bool stalled = false;
+
+	rq_lock_irqsave(rq, &rf);
+
+	/* Do not blame fair_ext while a higher scheduling class owns the CPU. */
+	if (rq->curr != current &&
+	    rq->curr->sched_class != &fair_sched_class &&
+	    rq->curr->sched_class != &idle_sched_class)
+		goto out_unlock;
+
+	list_for_each_entry(p, &rq->cfs_tasks, se.group_node) {
+		if (p->se.sched_delayed || task_has_idle_policy(p))
+			continue;
+
+		/* A task which owns the CPU cannot be stalled. */
+		if (task_on_cpu(rq, p) || task_current_donor(rq, p)) {
+			fair_ext_watchdog_reset(p, now, seq);
+			continue;
+		}
+
+		if (!fair_ext_watchdog_stalled(p, now, timeout, seq))
+			continue;
+
+		get_task_comm(report->comm, p);
+		report->pid = task_pid_nr(p);
+		report->cpu = cpu_of(rq);
+		report->duration_ms =
+			jiffies_to_msecs(now - p->scx.fair_ext_watchdog.at);
+		stalled = true;
+		break;
+	}
+
+out_unlock:
+	rq_unlock_irqrestore(rq, &rf);
+	return stalled;
+}
+
+static bool
+fair_ext_watchdog_disable(struct sched_ext_ops *ops,
+			  const struct fair_ext_watchdog_report *report)
+{
+	bool disabled = false;
+
+	scoped_guard(mutex, &fair_ext_mutex) {
+		if (fair_ext_registered_ops == ops &&
+		    rcu_access_pointer(fair_ext_ops) == ops) {
+			fair_ext_disable_callbacks(ops);
+			RCU_INIT_POINTER(fair_ext_ops, NULL);
+			disabled = true;
+		}
+	}
+
+	if (!disabled)
+		return false;
+
+	synchronize_rcu();
+	pr_err("fair_ext: %s[%d] on CPU %d failed to run for %u.%03us; disabling extension\n",
+	       report->comm, report->pid, report->cpu,
+	       report->duration_ms / 1000, report->duration_ms % 1000);
+	return true;
+}
+
+static int fair_ext_watchdog(void *data)
+{
+	struct sched_ext_ops *ops = data;
+	unsigned long interval = max(READ_ONCE(fair_ext_watchdog_timeout) / 2,
+				     1UL);
+
+	while (!kthread_should_stop()) {
+		struct fair_ext_watchdog_report report;
+		unsigned long seq;
+		int cpu;
+
+		schedule_timeout_interruptible(interval);
+		if (kthread_should_stop())
+			break;
+
+		seq = atomic_long_inc_return(&fair_ext_watchdog_seq);
+		for_each_online_cpu(cpu) {
+			if (fair_ext_watchdog_check_rq(cpu_rq(cpu), &report,
+						       seq)) {
+				fair_ext_watchdog_disable(ops, &report);
+				while (!kthread_should_stop())
+					schedule_timeout_interruptible(MAX_SCHEDULE_TIMEOUT);
+				return 0;
+			}
+			cond_resched();
+		}
+	}
+
+	return 0;
 }
 
 __bpf_kfunc_start_defs();
@@ -330,20 +480,36 @@ bool scx_fair_registered(void)
 
 int scx_fair_reg(struct sched_ext_ops *ops, struct bpf_link *link)
 {
+	struct task_struct *watchdog;
+
 	guard(mutex)(&scx_enable_mutex);
 	guard(mutex)(&fair_ext_mutex);
 	if (scx_enable_state() != SCX_DISABLED || fair_ext_registered_ops)
 		return -EBUSY;
 
+	watchdog = kthread_create(fair_ext_watchdog, ops,
+				  "fair_ext_watchdog");
+	if (IS_ERR(watchdog))
+		return PTR_ERR(watchdog);
+	sched_set_fifo_low(watchdog);
+
 	fair_ext_registered_ops = ops;
+	fair_ext_watchdog_task = watchdog;
+	fair_ext_watchdog_timeout = ops->timeout_ms ?
+		msecs_to_jiffies(ops->timeout_ms) :
+		FAIR_EXT_WATCHDOG_MAX_TIMEOUT;
+	/* Make samples left by a previous attachment discontinuous. */
+	atomic_long_inc(&fair_ext_watchdog_seq);
 	rcu_assign_pointer(fair_ext_ops, ops);
 	fair_ext_enable_callbacks(ops);
+	wake_up_process(watchdog);
 
 	return 0;
 }
 
 void scx_fair_unreg(struct sched_ext_ops *ops, struct bpf_link *link)
 {
+	struct task_struct *watchdog;
 	bool active = false;
 
 	guard(mutex)(&scx_enable_mutex);
@@ -351,6 +517,8 @@ void scx_fair_unreg(struct sched_ext_ops *ops, struct bpf_link *link)
 		if (WARN_ON_ONCE(fair_ext_registered_ops != ops))
 			return;
 
+		watchdog = fair_ext_watchdog_task;
+		fair_ext_watchdog_task = NULL;
 		fair_ext_registered_ops = NULL;
 		if (rcu_access_pointer(fair_ext_ops) == ops) {
 			fair_ext_disable_callbacks(ops);
@@ -360,7 +528,8 @@ void scx_fair_unreg(struct sched_ext_ops *ops, struct bpf_link *link)
 			WARN_ON_ONCE(rcu_access_pointer(fair_ext_ops));
 		}
 	}
-
+	if (watchdog)
+		kthread_stop(watchdog);
 	if (!active)
 		return;
 

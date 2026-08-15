@@ -574,8 +574,11 @@ The current fair_ext state is available from sysfs::
     # cat /sys/kernel/fair_ext/state
     enabled
 
-The possible states are ``disabled`` when no policy is attached and ``enabled``
-when an attached policy is active.
+The possible states are ``disabled`` when no policy is attached, ``enabled``
+when an attached policy is active, and ``faulted`` when the watchdog has
+disabled the callbacks but the BPF link remains attached. The latter state
+allows a policy manager to distinguish a failed policy from an ordinary
+detach.
 
 The struct_ops map ID of the attached policy is available in
 ``/sys/kernel/fair_ext/map_id``. It contains zero when no policy is attached
@@ -653,6 +656,34 @@ native balancing to continue after the callback, so the callback can augment
 fair balancing. Negative errors and unrecognized return values also fail open
 to native balancing. The callback can therefore augment fair balancing or
 replace an individual pass without manipulating runqueues directly.
+
+Runnable-task watchdog
+----------------------
+
+A fair_ext policy can repeatedly suppress native balancing or continually
+favor other tasks through vlag selection.
+The runnable-task watchdog is a best-effort safety mechanism. It restores
+native fair behavior when a task is observed eligible without making runtime
+progress for longer than ``sched_ext_ops.timeout_ms``. A zero timeout selects
+the default of 30 seconds, and values greater than 30 seconds are rejected.
+
+The watchdog requires the task to be observed in consecutive scans. A task
+which migrates from a runqueue not yet scanned to one already scanned can be
+missed for that pass, restarting its observation window and delaying detection
+beyond the configured timeout. This conservative behavior avoids disabling an
+extension based on an uncertain runnable interval without adding bookkeeping
+to fair's enqueue and dequeue paths.
+
+The wait timestamp is reset when a task runs or is not observed in the
+preceding scan. Delayed-dequeue, throttled, and SCHED_IDLE tasks are excluded.
+A runqueue is not checked while a higher scheduling class owns its CPU. The
+watchdog itself runs in a low-priority FIFO kernel thread so a broken fair
+policy cannot prevent recovery.
+
+On timeout, the kernel logs the stalled task, CPU, and wait duration, disables
+all callbacks, and patches the fair_ext hooks back out. The BPF link remains
+attached but inactive so its owner can inspect counters and detach it; another
+fair_ext policy cannot attach until that link is detached.
 
 Scope
 -----

@@ -178,6 +178,12 @@ struct scx_dsq_list_node {
 
 struct scx_sched;
 
+struct fair_ext_watchdog {
+	u64			runtime;
+	unsigned long		at;
+	unsigned long		seq;
+};
+
 /*
  * The following is embedded in task_struct and contains all fields necessary
  * for a task to be scheduled by SCX.
@@ -211,6 +217,9 @@ struct sched_ext_entity {
 
 	struct list_head	runnable_node;	/* rq->scx.runnable_list */
 	unsigned long		runnable_at;
+
+	/* Periodic progress sample used by the fair_ext watchdog. */
+	struct fair_ext_watchdog fair_ext_watchdog;
 
 #ifdef CONFIG_EXT_SUB_SCHED
 	unsigned long		rescue_at;	/* queued on a rescue DSQ at, jiffies */
