@@ -170,6 +170,9 @@ auto-test-targets :=			\
 	dsp_local_on			\
 	enq_select_cpu			\
 	exit				\
+	fair_ext_mode_validation	\
+	fair_ext_operations		\
+	fair_ext_watchdog		\
 	hotplug				\
 	init_enable_count		\
 	maximal				\
