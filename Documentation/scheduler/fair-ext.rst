@@ -135,3 +135,11 @@ Scope
 Fair continues to control runqueue ordering, preemption, bandwidth accounting,
 and migration mechanics. NUMA balancing, affinity changes, CPU hotplug, and
 other scheduler mechanisms may move a task after ``select_cpu()`` returns.
+
+Examples and tests
+==================
+
+Example policies and their standalone build system live in
+``tools/sched/fair_ext/``. Fair extension selftests live in
+``tools/testing/selftests/sched/fair_ext/`` and are also built and run through
+the scheduler kselftest target.

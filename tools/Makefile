@@ -28,6 +28,7 @@ help:
 	@echo '  objtool                - an ELF object analysis tool'
 	@echo '  perf                   - Linux performance measurement and analysis tool'
 	@echo '  selftests              - various kernel selftests'
+	@echo '  fair_ext               - fair scheduler extension examples'
 	@echo '  sched_ext              - sched_ext example schedulers'
 	@echo '  bootconfig             - boot config tool'
 	@echo '  spi                    - spi tools'
@@ -95,6 +96,9 @@ perf: FORCE
 
 sched_ext: FORCE
 	$(call descend,sched_ext)
+
+fair_ext: FORCE
+	$(call descend,sched/fair_ext)
 
 selftests: FORCE
 	$(call descend,testing/$@)
@@ -198,6 +202,9 @@ perf_clean:
 sched_ext_clean:
 	$(call descend,sched_ext,clean)
 
+fair_ext_clean:
+	$(call descend,sched/fair_ext,clean)
+
 selftests_clean:
 	$(call descend,testing/$(@:_clean=),clean)
 
@@ -231,6 +238,6 @@ clean: acpi_clean counter_clean cpupower_clean dma_clean hv_clean firewire_clean
 		freefall_clean build_clean libbpf_clean libsubcmd_clean \
 		gpio_clean objtool_clean leds_clean wmi_clean firmware_clean debugging_clean \
 		intel-speed-select_clean tracing_clean thermal_clean thermometer_clean thermal-engine_clean \
-		sched_ext_clean ynl_clean
+		fair_ext_clean sched_ext_clean ynl_clean
 
 .PHONY: FORCE
