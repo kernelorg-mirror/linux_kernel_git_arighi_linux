@@ -91,6 +91,7 @@ struct timespec64;
 struct user_event_mm;
 
 #include <linux/sched/ext.h>
+#include <linux/sched/fair_ext.h>
 
 /*
  * Task state bitmask. NOTE! These bits are also
@@ -924,6 +925,9 @@ struct task_struct {
 	struct uclamp_se		uclamp[UCLAMP_CNT];
 #endif
 
+#ifdef CONFIG_SCHED_CLASS_FAIR_EXT
+	struct sched_fair_ext_entity	fair_ext;
+#endif
 	struct sched_statistics         stats;
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS

@@ -8,6 +8,12 @@
 
 struct task_struct;
 
+struct sched_fair_ext_entity {
+	u64 watchdog_runtime;
+	unsigned long watchdog_at;
+	unsigned long watchdog_seq;
+};
+
 /**
  * enum fair_ext_idle_type - CPU idle state for a fair balance pass
  * @FAIR_EXT_CPU_NOT_IDLE: CPU is not idle
@@ -94,6 +100,13 @@ struct sched_fair_ops {
 	 * corresponding CPU.
 	 */
 	void (*update_idle)(s32 cpu, bool idle);
+
+	/**
+	 * @timeout_ms: Runnable-task watchdog timeout in milliseconds
+	 *
+	 * Zero selects the default timeout of 30 seconds.
+	 */
+	u32 timeout_ms;
 
 	/**
 	 * @name: Name of the fair extension

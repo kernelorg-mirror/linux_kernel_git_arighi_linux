@@ -18,6 +18,7 @@ The interface provides the following callbacks::
             s32 (*can_migrate_task)(struct task_struct *p, s32 src_cpu,
                                     s32 dst_cpu);
             void (*update_idle)(s32 cpu, bool idle);
+            u32 timeout_ms;
             char name[FAIR_EXT_OPS_NAME_LEN];
     };
 
@@ -37,9 +38,26 @@ The current state is available from sysfs::
     # cat /sys/kernel/fair_ext/state
     enabled
 
-The state is ``disabled`` when no extension is attached and ``enabled`` while
-an extension is active. ``/sys/kernel/fair_ext/map_id`` reports the attached
-struct_ops map ID, or zero when no extension is attached.
+The state is ``disabled`` when no extension is attached, ``enabled`` while an
+extension is active, and ``faulted`` when the watchdog has restored native
+fair behavior while leaving the BPF link attached. The
+``/sys/kernel/fair_ext/map_id`` file reports the attached struct_ops map ID,
+or zero when no extension is attached.
+
+Runnable-task watchdog
+======================
+
+A fair extension can suppress native balancing in a way that prevents a
+runnable task from making progress. A low-priority FIFO watchdog restores
+native fair behavior when a task is observed runnable without runtime progress
+for longer than ``sched_fair_ops.timeout_ms``. Zero selects the default of 30
+seconds, and values greater than 30 seconds are rejected.
+
+The watchdog requires a task to be observed in consecutive scans. A migration
+can cause an observation to be missed and delay detection, but cannot cause an
+extension to be disabled based on an uncertain runnable interval. Delayed
+dequeue, throttled, and SCHED_IDLE tasks are excluded, as are intervals during
+which a higher scheduling class owns the CPU.
 
 Fair placement within a CPU subset
 ==================================
