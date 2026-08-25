@@ -13,6 +13,7 @@ Scheduler
     sched-deadline
     sched-design-CFS
     sched-eevdf
+    fair-ext
     sched-domains
     sched-capacity
     sched-energy

@@ -197,3 +197,13 @@ config SCHED_CLASS_EXT
 	  For more information:
 	    Documentation/scheduler/sched-ext.rst
 	    https://github.com/sched-ext/scx
+
+config SCHED_CLASS_FAIR_EXT
+	bool "BPF extensions for the fair scheduling class"
+	depends on BPF_SYSCALL && BPF_JIT && DEBUG_INFO_BTF
+	help
+	  This option allows BPF struct_ops programs to override selected fair
+	  scheduler policy decisions while tasks remain in fair_sched_class and
+	  the native fair scheduler retains runqueue ownership.
+
+	  If unsure, say N.

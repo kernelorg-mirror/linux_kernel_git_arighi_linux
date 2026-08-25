@@ -37,6 +37,7 @@
 #include <linux/sched/clock.h>
 #include <linux/sched/cond_resched.h>
 #include <linux/sched/cputime.h>
+#include <linux/sched/fair_ext.h>
 #include <linux/sched/isolation.h>
 #include <linux/sched/nohz.h>
 #include <linux/sched/prio.h>
@@ -9786,6 +9787,14 @@ __select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags,
 
 static int select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 {
+	int cpu;
+
+	if (fair_ext_select_cpu_enabled()) {
+		cpu = fair_ext_select_cpu(p, prev_cpu, wake_flags);
+		if (cpu >= 0 && cpu < nr_cpu_ids && task_allowed_on_cpu(p, cpu))
+			return cpu;
+	}
+
 	return __select_task_rq_fair(p, prev_cpu, wake_flags, NULL);
 }
 
