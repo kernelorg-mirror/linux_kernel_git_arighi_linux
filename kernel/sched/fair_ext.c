@@ -24,6 +24,7 @@
 
 static s32 sched_fair_ops__select_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags);
 static s32 sched_fair_ops__balance(const struct fair_ext_balance_ctx *ctx);
+static s32 sched_fair_ops__can_migrate_task(struct task_struct *p, s32 src_cpu, s32 dst_cpu);
 
 static struct bpf_struct_ops bpf_sched_fair_ops;
 
@@ -49,16 +50,23 @@ struct fair_ext_balance_call_ctx {
 	bool active;
 };
 
+struct fair_ext_can_migrate_task_ctx {
+	struct task_struct *p;
+};
+
 static DEFINE_PER_CPU(struct fair_ext_select_ctx, fair_ext_select_ctx);
 static DEFINE_PER_CPU(struct fair_ext_balance_call_ctx, fair_ext_balance_call_ctx);
+static DEFINE_PER_CPU(struct fair_ext_can_migrate_task_ctx, fair_ext_can_migrate_task_ctx);
 static DEFINE_PER_CPU(cpumask_var_t, fair_ext_preferred_mask);
 
 DEFINE_STATIC_CALL(fair_ext_select_cpu_call, sched_fair_ops__select_cpu);
 DEFINE_STATIC_CALL(fair_ext_balance_call, sched_fair_ops__balance);
+DEFINE_STATIC_CALL(fair_ext_can_migrate_task_call, sched_fair_ops__can_migrate_task);
 
 /* Keep each fair extension hook patched out until it is registered. */
 DEFINE_STATIC_KEY_FALSE(__fair_ext_select_cpu_enabled);
 DEFINE_STATIC_KEY_FALSE(__fair_ext_balance_enabled);
+DEFINE_STATIC_KEY_FALSE(__fair_ext_can_migrate_task_enabled);
 
 static void fair_ext_disable_callbacks(struct sched_fair_ops *ops);
 
@@ -156,6 +164,25 @@ bool fair_ext_balance(int cpu, enum cpu_idle_type idle)
 	return handled;
 }
 
+bool fair_ext_can_migrate_task(struct task_struct *p, int src_cpu, int dst_cpu)
+{
+	struct fair_ext_can_migrate_task_ctx *ctx;
+	s32 ret = FAIR_EXT_CAN_MIGRATE_CONTINUE;
+
+	lockdep_assert_preemption_disabled();
+
+	guard(rcu)();
+	ctx = this_cpu_ptr(&fair_ext_can_migrate_task_ctx);
+	if (WARN_ON_ONCE(ctx->p))
+		return true;
+
+	ctx->p = p;
+	ret = static_call(fair_ext_can_migrate_task_call)(p, src_cpu, dst_cpu);
+	ctx->p = NULL;
+
+	return ret != FAIR_EXT_CAN_MIGRATE_SKIP;
+}
+
 __bpf_kfunc_start_defs();
 
 /**
@@ -224,19 +251,22 @@ __bpf_kfunc s32 sched_fair_bpf_cpu_idle(s32 cpu)
  * sched_fair_bpf_has_idle_cpu - test whether a CPU subset has idle capacity
  * @preferred_mask: CPUs to inspect
  *
- * This kfunc is available only from sched_fair_ops.balance(). Returns one if an
- * active CPU in @preferred_mask is currently available idle, zero otherwise,
- * or -EPERM if called outside the balance callback.
+ * This kfunc is available from sched_fair_ops.balance() and
+ * sched_fair_ops.can_migrate_task(). Returns one if an active CPU in
+ * @preferred_mask is currently available idle, zero otherwise, or -EPERM if
+ * called outside either callback.
  */
 __bpf_kfunc s32 sched_fair_bpf_has_idle_cpu(const struct cpumask *preferred_mask)
 {
 	struct fair_ext_balance_call_ctx *ctx;
+	struct fair_ext_can_migrate_task_ctx *migrate_ctx;
 	int cpu;
 
 	lockdep_assert_preemption_disabled();
 
 	ctx = this_cpu_ptr(&fair_ext_balance_call_ctx);
-	if (unlikely(!ctx->active))
+	migrate_ctx = this_cpu_ptr(&fair_ext_can_migrate_task_ctx);
+	if (unlikely(!ctx->active && !migrate_ctx->p))
 		return -EPERM;
 	if (!preferred_mask)
 		return -EINVAL;
@@ -291,10 +321,16 @@ BTF_KFUNCS_END(fair_ext_balance_kfunc_ids)
 
 static int fair_ext_balance_kfunc_filter(const struct bpf_prog *prog, u32 kfunc_id)
 {
+	int ret;
+
 	if (!btf_id_set8_contains(&fair_ext_balance_kfunc_ids, kfunc_id))
 		return 0;
 
-	return fair_ext_kfunc_filter(prog, offsetof(struct sched_fair_ops, balance));
+	ret = fair_ext_kfunc_filter(prog, offsetof(struct sched_fair_ops, balance));
+	if (!ret)
+		return 0;
+
+	return fair_ext_kfunc_filter(prog, offsetof(struct sched_fair_ops, can_migrate_task));
 }
 
 static const struct btf_kfunc_id_set fair_ext_balance_kfunc_set = {
@@ -314,6 +350,10 @@ static void fair_ext_enable_callbacks(struct sched_fair_ops *ops)
 		static_call_update(fair_ext_balance_call, ops->balance);
 		static_branch_enable(&__fair_ext_balance_enabled);
 	}
+	if (ops->can_migrate_task) {
+		static_call_update(fair_ext_can_migrate_task_call, ops->can_migrate_task);
+		static_branch_enable(&__fair_ext_can_migrate_task_enabled);
+	}
 }
 
 static void fair_ext_disable_callbacks(struct sched_fair_ops *ops)
@@ -327,6 +367,11 @@ static void fair_ext_disable_callbacks(struct sched_fair_ops *ops)
 		static_branch_disable(&__fair_ext_balance_enabled);
 		static_call_update(fair_ext_balance_call,
 				   sched_fair_ops__balance);
+	}
+	if (ops->can_migrate_task) {
+		static_branch_disable(&__fair_ext_can_migrate_task_enabled);
+		static_call_update(fair_ext_can_migrate_task_call,
+				   sched_fair_ops__can_migrate_task);
 	}
 }
 
@@ -394,7 +439,7 @@ static int bpf_sched_fair_validate(void *kdata)
 {
 	struct sched_fair_ops *ops = kdata;
 
-	if (!ops->select_cpu && !ops->balance)
+	if (!ops->select_cpu && !ops->balance && !ops->can_migrate_task)
 		return -EINVAL;
 
 	return 0;
@@ -434,9 +479,15 @@ static s32 sched_fair_ops__balance(const struct fair_ext_balance_ctx *ctx)
 	return FAIR_EXT_BALANCE_CONTINUE;
 }
 
+static s32 sched_fair_ops__can_migrate_task(struct task_struct *p, s32 src_cpu, s32 dst_cpu)
+{
+	return FAIR_EXT_CAN_MIGRATE_CONTINUE;
+}
+
 static struct sched_fair_ops __bpf_ops_sched_fair_ops = {
 	.select_cpu	= sched_fair_ops__select_cpu,
 	.balance	= sched_fair_ops__balance,
+	.can_migrate_task = sched_fair_ops__can_migrate_task,
 };
 
 static struct bpf_struct_ops bpf_sched_fair_ops = {

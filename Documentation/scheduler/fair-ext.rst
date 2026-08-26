@@ -15,6 +15,8 @@ The interface provides the following callbacks::
             s32 (*select_cpu)(struct task_struct *p, s32 prev_cpu,
                               u64 wake_flags);
             s32 (*balance)(const struct fair_ext_balance_ctx *ctx);
+            s32 (*can_migrate_task)(struct task_struct *p, s32 src_cpu,
+                                    s32 dst_cpu);
             char name[FAIR_EXT_OPS_NAME_LEN];
     };
 
@@ -77,6 +79,27 @@ capacity with::
 Returning ``FAIR_EXT_BALANCE_HANDLED`` suppresses native balancing for that
 pass. ``FAIR_EXT_BALANCE_CONTINUE``, negative errors, and unrecognized return
 values continue native balancing.
+
+``balance()`` has no migration-candidate context. Its decision applies to the
+entire balance pass on ``ctx->cpu``; suppressing the pass prevents native fair
+from considering every migration candidate for that pass.
+
+Migration filtering
+===================
+
+``can_migrate_task()`` runs when native fair load balancing considers moving a
+task from ``src_cpu`` to ``dst_cpu``. Returning
+``FAIR_EXT_CAN_MIGRATE_SKIP`` rejects that candidate. All other return values
+continue native migration checks.
+
+Unlike ``balance()``, the decision is local to the task passed to
+``can_migrate_task()``. Rejecting one candidate leaves the balance pass active
+and does not prevent unrelated tasks from being migrated.
+
+The callback filters load-balancing migrations only. Affinity changes, CPU
+hotplug, and other forced migration mechanisms remain under native scheduler
+control. ``sched_fair_bpf_has_idle_cpu()`` is available from both ``balance()``
+and ``can_migrate_task()``.
 
 Scope
 =====

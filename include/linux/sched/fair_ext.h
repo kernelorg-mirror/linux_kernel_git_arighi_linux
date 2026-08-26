@@ -31,6 +31,16 @@ enum fair_ext_balance_ret {
 };
 
 /**
+ * enum fair_ext_can_migrate_ret - fair migration callback result
+ * @FAIR_EXT_CAN_MIGRATE_CONTINUE: Continue native migration checks
+ * @FAIR_EXT_CAN_MIGRATE_SKIP: Skip this task as a migration candidate
+ */
+enum fair_ext_can_migrate_ret {
+	FAIR_EXT_CAN_MIGRATE_CONTINUE	= 0,
+	FAIR_EXT_CAN_MIGRATE_SKIP	= 1,
+};
+
+/**
  * struct fair_ext_balance_ctx - minimal fair balancing state
  * @cpu: CPU on whose behalf balancing is running
  * @idle: idle state of @cpu
@@ -62,6 +72,17 @@ struct sched_fair_ops {
 	 * @ctx: minimal state for the CPU requesting balance
 	 */
 	s32 (*balance)(const struct fair_ext_balance_ctx *ctx);
+
+	/**
+	 * @can_migrate_task: Filter fair load-balancing migration candidates
+	 * @p: task being considered for migration
+	 * @src_cpu: CPU from which @p would be migrated
+	 * @dst_cpu: CPU to which @p would be migrated
+	 *
+	 * Return %FAIR_EXT_CAN_MIGRATE_SKIP to prevent this load-balancing
+	 * migration. All other values continue native migration checks.
+	 */
+	s32 (*can_migrate_task)(struct task_struct *p, s32 src_cpu, s32 dst_cpu);
 
 	/**
 	 * @name: Name of the fair extension

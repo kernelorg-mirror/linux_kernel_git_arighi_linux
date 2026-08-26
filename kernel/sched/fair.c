@@ -10963,6 +10963,10 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 		return 0;
 	}
 
+	if (fair_ext_can_migrate_task_enabled() &&
+	    !fair_ext_can_migrate_task(p, env->src_cpu, env->dst_cpu))
+		return 0;
+
 	/*
 	 * Aggressive migration if:
 	 * 1) active balance
