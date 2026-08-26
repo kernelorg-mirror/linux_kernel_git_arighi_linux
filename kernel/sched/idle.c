@@ -484,6 +484,8 @@ static void put_prev_task_idle(struct rq *rq, struct task_struct *prev, struct t
 {
 	update_curr_idle(rq);
 	scx_update_idle(rq, false, true);
+	if (fair_ext_update_idle_enabled())
+		fair_ext_update_idle(rq, false);
 	update_rq_avg_idle(rq);
 }
 
@@ -491,6 +493,8 @@ static void set_next_task_idle(struct rq *rq, struct task_struct *next, bool fir
 {
 	update_idle_core(rq);
 	scx_update_idle(rq, true, true);
+	if (fair_ext_update_idle_enabled())
+		fair_ext_update_idle(rq, true);
 	schedstat_inc(rq->sched_goidle);
 	next->se.exec_start = rq_clock_task(rq);
 

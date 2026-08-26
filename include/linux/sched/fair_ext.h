@@ -85,6 +85,17 @@ struct sched_fair_ops {
 	s32 (*can_migrate_task)(struct task_struct *p, s32 src_cpu, s32 dst_cpu);
 
 	/**
+	 * @update_idle: Notify the extension of a CPU idle-state transition
+	 * @cpu: CPU entering or leaving the idle state
+	 * @idle: whether @cpu is entering the idle state
+	 *
+	 * The current state of every online CPU is reported while the extension
+	 * is attached. This initial update is serialized with transitions on the
+	 * corresponding CPU.
+	 */
+	void (*update_idle)(s32 cpu, bool idle);
+
+	/**
 	 * @name: Name of the fair extension
 	 *
 	 * Must be a non-empty valid BPF object name.

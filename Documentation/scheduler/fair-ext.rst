@@ -17,6 +17,7 @@ The interface provides the following callbacks::
             s32 (*balance)(const struct fair_ext_balance_ctx *ctx);
             s32 (*can_migrate_task)(struct task_struct *p, s32 src_cpu,
                                     s32 dst_cpu);
+            void (*update_idle)(s32 cpu, bool idle);
             char name[FAIR_EXT_OPS_NAME_LEN];
     };
 
@@ -100,6 +101,15 @@ The callback filters load-balancing migrations only. Affinity changes, CPU
 hotplug, and other forced migration mechanisms remain under native scheduler
 control. ``sched_fair_bpf_has_idle_cpu()`` is available from both ``balance()``
 and ``can_migrate_task()``.
+
+Idle-state tracking
+===================
+
+``update_idle()`` runs whenever a CPU enters or leaves the idle state. The
+``idle`` argument is true on idle entry and false on idle exit. When an
+extension is attached, it receives one callback for every online CPU so that
+it can initialize its idle-state tracking. Each initial update is serialized
+with transition notifications for the corresponding CPU.
 
 Scope
 =====

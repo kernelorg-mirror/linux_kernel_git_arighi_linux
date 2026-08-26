@@ -1920,18 +1920,23 @@ static inline void scx_rq_clock_invalidate(struct rq *rq) {}
 DECLARE_STATIC_KEY_FALSE(__fair_ext_select_cpu_enabled);
 DECLARE_STATIC_KEY_FALSE(__fair_ext_balance_enabled);
 DECLARE_STATIC_KEY_FALSE(__fair_ext_can_migrate_task_enabled);
+DECLARE_STATIC_KEY_FALSE(__fair_ext_update_idle_enabled);
 
 #define fair_ext_select_cpu_enabled() static_branch_unlikely(&__fair_ext_select_cpu_enabled)
 #define fair_ext_balance_enabled() static_branch_unlikely(&__fair_ext_balance_enabled)
 #define fair_ext_can_migrate_task_enabled() \
 	static_branch_unlikely(&__fair_ext_can_migrate_task_enabled)
+#define fair_ext_update_idle_enabled() \
+	static_branch_unlikely(&__fair_ext_update_idle_enabled)
 int fair_ext_select_cpu(struct task_struct *p, int prev_cpu, int wake_flags);
 bool fair_ext_balance(int cpu, enum cpu_idle_type idle);
 bool fair_ext_can_migrate_task(struct task_struct *p, int src_cpu, int dst_cpu);
+void fair_ext_update_idle(struct rq *rq, bool idle);
 #else
 #define fair_ext_select_cpu_enabled() false
 #define fair_ext_balance_enabled() false
 #define fair_ext_can_migrate_task_enabled() false
+#define fair_ext_update_idle_enabled() false
 static inline int fair_ext_select_cpu(struct task_struct *p, int prev_cpu, int wake_flags)
 {
 	return -1;
@@ -1946,6 +1951,8 @@ static inline bool fair_ext_can_migrate_task(struct task_struct *p, int src_cpu,
 {
 	return true;
 }
+
+static inline void fair_ext_update_idle(struct rq *rq, bool idle) {}
 #endif /* CONFIG_SCHED_CLASS_FAIR_EXT */
 static inline void assert_balance_callbacks_empty(struct rq *rq)
 {
