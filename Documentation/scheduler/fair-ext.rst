@@ -14,6 +14,7 @@ The interface provides the following callbacks::
     struct sched_fair_ops {
             s32 (*select_cpu)(struct task_struct *p, s32 prev_cpu,
                               u64 wake_flags);
+            s32 (*balance)(const struct fair_ext_balance_ctx *ctx);
             char name[FAIR_EXT_OPS_NAME_LEN];
     };
 
@@ -55,6 +56,27 @@ callback can query the selected CPU with::
 
 Both kfuncs are available only from ``sched_fair_ops.select_cpu()`` and only
 for the task passed to the active callback.
+
+Load balancing
+==============
+
+``balance()`` runs from fair's periodic, NOHZ-idle, and newly-idle balancing
+paths. It receives policy-relevant local state::
+
+    struct fair_ext_balance_ctx {
+            s32 cpu;
+            enum fair_ext_idle_type idle;
+    };
+
+``idle`` is ``FAIR_EXT_CPU_NOT_IDLE``, ``FAIR_EXT_CPU_IDLE``, or
+``FAIR_EXT_CPU_NEWLY_IDLE``. A policy can query whether a CPU subset has idle
+capacity with::
+
+    s32 sched_fair_bpf_has_idle_cpu(const struct cpumask *preferred_mask);
+
+Returning ``FAIR_EXT_BALANCE_HANDLED`` suppresses native balancing for that
+pass. ``FAIR_EXT_BALANCE_CONTINUE``, negative errors, and unrecognized return
+values continue native balancing.
 
 Scope
 =====
