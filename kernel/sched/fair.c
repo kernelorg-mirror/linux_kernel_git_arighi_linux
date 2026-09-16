@@ -4431,7 +4431,7 @@ void init_numa_balancing(u64 clone_flags, struct task_struct *p)
 /*
  * Drive the periodic memory faults..
  */
-static void task_tick_numa(struct rq *rq, struct task_struct *curr)
+void task_tick_numa(struct rq *rq, struct task_struct *curr)
 {
 	struct callback_head *work = &curr->numa_work;
 	u64 period, now;
@@ -4496,10 +4496,6 @@ static void update_scan_period(struct task_struct *p, int new_cpu)
 }
 
 #else /* !CONFIG_NUMA_BALANCING: */
-
-static void task_tick_numa(struct rq *rq, struct task_struct *curr)
-{
-}
 
 static inline void account_numa_enqueue(struct rq *rq, struct task_struct *p)
 {
