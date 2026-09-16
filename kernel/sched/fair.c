@@ -3267,8 +3267,13 @@ static bool task_numa_compare(struct task_numa_env *env,
 
 	rcu_read_lock();
 	cur = rcu_dereference_all(dst_rq->curr);
+	/*
+	 * Never pick a task under a BPF scheduler as the swap partner: its
+	 * placement is left to that scheduler, see numa_migrate_preferred().
+	 * Moving the faulting task alone to the destination is still allowed.
+	 */
 	if (cur && ((cur->flags & (PF_EXITING | PF_KTHREAD)) ||
-		    !cur->mm))
+		    !cur->mm || task_on_scx(cur)))
 		cur = NULL;
 
 	/*
@@ -3643,6 +3648,14 @@ static void numa_migrate_preferred(struct task_struct *p)
 
 	/* Success if task is already running on preferred CPU */
 	if (task_node(p) == p->numa_preferred_nid)
+		return;
+
+	/*
+	 * A task under a BPF scheduler is placed by that scheduler. Keep the
+	 * statistics coming, which is what makes p->numa_preferred_nid worth
+	 * reading, but leave the placement alone.
+	 */
+	if (task_on_scx(p))
 		return;
 
 	/* Otherwise, try migrate to a CPU on the preferred node */
