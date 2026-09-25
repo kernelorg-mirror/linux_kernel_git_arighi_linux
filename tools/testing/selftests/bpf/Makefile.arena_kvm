@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: GPL-2.0
+SELFTEST_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+KDIR := $(abspath $(SELFTEST_DIR)/../../../..)
+OUTPUT ?= $(SELFTEST_DIR)/.output/arena_kvm
+CLANG ?= clang
+CC ?= cc
+BPFTOOL ?= bpftool
+LIBBPF_OUTPUT := $(OUTPUT)/libbpf
+LIBBPF_A := $(LIBBPF_OUTPUT)/libbpf.a
+
+BPF_INCLUDES := -I$(OUTPUT) -I$(KDIR)/tools/lib -I$(LIBBPF_OUTPUT) \
+	-I$(SELFTEST_DIR)/libarena/include
+C_INCLUDES := -I$(KDIR)/tools/lib -I$(KDIR)/include/uapi
+
+.PHONY: all clean test
+all: $(OUTPUT)/guest.bpf.o $(OUTPUT)/host.bpf.o \
+	$(OUTPUT)/guest-init $(OUTPUT)/host-runner
+
+$(OUTPUT):
+	mkdir -p $@
+
+$(LIBBPF_A): | $(OUTPUT)
+	mkdir -p $(LIBBPF_OUTPUT)
+	$(MAKE) -C $(KDIR)/tools/lib/bpf OUTPUT=$(LIBBPF_OUTPUT)/ $@
+
+$(OUTPUT)/vmlinux.h: $(KDIR)/vmlinux | $(OUTPUT)
+	$(BPFTOOL) btf dump file $< format c > $@
+
+$(OUTPUT)/guest.bpf.o: $(SELFTEST_DIR)/arena_kvm_guest.bpf.c \
+		$(SELFTEST_DIR)/arena_kvm_shared.h \
+		$(OUTPUT)/vmlinux.h $(LIBBPF_A) | $(OUTPUT)
+	$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+		-Wno-missing-declarations $(BPF_INCLUDES) -c $< -o $@
+
+$(OUTPUT)/host.bpf.o: $(SELFTEST_DIR)/arena_kvm_host.bpf.c \
+		$(SELFTEST_DIR)/arena_kvm_shared.h \
+		$(OUTPUT)/vmlinux.h $(LIBBPF_A) | $(OUTPUT)
+	$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_x86 \
+		-Wno-missing-declarations $(BPF_INCLUDES) -c $< -o $@
+
+$(OUTPUT)/guest-init: $(SELFTEST_DIR)/arena_kvm_guest.c \
+		$(LIBBPF_A) | $(OUTPUT)
+	$(CC) -O2 -s $(C_INCLUDES) $< $(LIBBPF_A) \
+		-lelf -lz -lzstd -o $@
+
+$(OUTPUT)/host-runner: $(SELFTEST_DIR)/arena_kvm_host.c \
+		$(LIBBPF_A) | $(OUTPUT)
+	$(CC) -O2 -s -I$(KDIR)/tools/lib $< \
+		$(LIBBPF_A) -lelf -lz -lzstd -o $@
+
+test: all
+	@mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf
+	cd $(SELFTEST_DIR) && python3 arena_kvm.py
+
+clean:
+	rm -rf $(OUTPUT)
