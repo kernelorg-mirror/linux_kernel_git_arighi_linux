@@ -2608,13 +2608,16 @@ enum snt_e {
 	SNT_NORMAL,	/* set_next_task() */
 	SNT_PICK,	/* put_prev_set_next_task(): prev != next */
 	SNT_REPICK,	/* put_prev_set_next_task(): prev == next */
+	SNT_CONFIRM,	/* confirm a proxy donor after resolution */
+};
+
+enum {
+	SC_UCLAMP	= 1 << 0,
+	SC_CONFIRM	= 1 << 1,
 };
 
 struct sched_class {
-
-#ifdef CONFIG_UCLAMP_TASK
-	int uclamp_enabled;
-#endif
+	unsigned int flags;
 
 	/*
 	 * move_queued_task/activate_task/enqueue_task: rq->lock

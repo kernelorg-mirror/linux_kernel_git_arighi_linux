@@ -1877,7 +1877,7 @@ static inline void uclamp_rq_inc(struct rq *rq, struct task_struct *p, int flags
 	if (!uclamp_is_used())
 		return;
 
-	if (unlikely(!p->sched_class->uclamp_enabled))
+	if (unlikely(!(p->sched_class->flags & SC_UCLAMP)))
 		return;
 
 	/* Only inc the delayed task which being woken up. */
@@ -1905,7 +1905,7 @@ static inline void uclamp_rq_dec(struct rq *rq, struct task_struct *p)
 	if (!uclamp_is_used())
 		return;
 
-	if (unlikely(!p->sched_class->uclamp_enabled))
+	if (unlikely(!(p->sched_class->flags & SC_UCLAMP)))
 		return;
 
 	if (p->se.sched_delayed)
@@ -7182,9 +7182,10 @@ pick_again:
 	rq->next_class = next->sched_class;
 	if (sched_proxy_exec()) {
 		struct task_struct *prev_donor = rq->donor;
+		struct task_struct *donor = next;
 
-		rq_set_donor(rq, next);
-		next->blocked_donor = NULL;
+		rq_set_donor(rq, donor);
+		donor->blocked_donor = NULL;
 		if (unlikely(next->is_blocked)) {
 			next = find_proxy_task(rq, next, &rf);
 			if (!next) {
@@ -7196,8 +7197,7 @@ pick_again:
 				goto keep_resched;
 			}
 		}
-		if (rq->donor == prev_donor && prev != next) {
-			struct task_struct *donor = rq->donor;
+		if (donor == prev_donor && prev != next) {
 			/*
 			 * When transitioning like:
 			 *
@@ -7213,6 +7213,8 @@ pick_again:
 			donor->sched_class->put_prev_task(rq, donor, donor);
 			donor->sched_class->set_next_task(rq, donor, SNT_PICK);
 		}
+		if (donor->sched_class->flags & SC_CONFIRM)
+			donor->sched_class->set_next_task(rq, donor, SNT_CONFIRM);
 	} else {
 		rq_set_donor(rq, next);
 	}

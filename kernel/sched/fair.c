@@ -15406,7 +15406,7 @@ DEFINE_SCHED_CLASS(fair) = {
 #endif
 
 #ifdef CONFIG_UCLAMP_TASK
-	.uclamp_enabled		= 1,
+	.flags			= SC_UCLAMP,
 #endif
 };
 
