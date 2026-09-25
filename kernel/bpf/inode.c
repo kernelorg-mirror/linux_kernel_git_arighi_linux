@@ -336,7 +336,7 @@ static int bpffs_map_release(struct inode *inode, struct file *file)
 }
 
 /* bpffs_map_fops should only implement the basic
- * read operation for a BPF map.  The purpose is to
+ * read operation for a BPF map. The purpose is to
  * provide a simple user intuitive way to do
  * "cat bpffs/pathto/a-pinned-map".
  *
@@ -349,6 +349,42 @@ static const struct file_operations bpffs_map_fops = {
 	.open		= bpffs_map_open,
 	.read		= seq_read,
 	.release	= bpffs_map_release,
+};
+
+/*
+ * An arena with BPF_F_ARENA_NO_FREE pinned in bpffs can serve as a
+ * shared-memory file. The ordinary map FD is an anonymous inode with no
+ * size and cannot be opened by pathname, so keep the pin's inode and
+ * forward mmap to the map FD implementation. The pinned file uses ordinary
+ * address selection so QEMU can map the pages at another virtual address.
+ */
+static int bpffs_arena_open(struct inode *inode, struct file *file)
+{
+	struct bpf_map *map = inode->i_private;
+	int err;
+
+	err = security_bpf_map(map, file->f_mode);
+	if (err)
+		return err;
+	bpf_map_inc_with_uref(map);
+	file->private_data = map;
+	return 0;
+}
+
+static int bpffs_arena_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	return bpf_map_fops.mmap(file, vma);
+}
+
+static int bpffs_arena_release(struct inode *inode, struct file *file)
+{
+	return bpf_map_fops.release(inode, file);
+}
+
+static const struct file_operations bpffs_arena_fops = {
+	.open		= bpffs_arena_open,
+	.release	= bpffs_arena_release,
+	.mmap		= bpffs_arena_mmap,
 };
 
 static int bpffs_obj_open(struct inode *inode, struct file *file)
@@ -396,10 +432,17 @@ static int bpf_mkprog(struct dentry *dentry, umode_t mode, void *arg)
 static int bpf_mkmap(struct dentry *dentry, umode_t mode, void *arg)
 {
 	struct bpf_map *map = arg;
+	bool shared_arena = map->map_type == BPF_MAP_TYPE_ARENA &&
+			    (map->map_flags & BPF_F_ARENA_NO_FREE);
+	int err;
 
-	return bpf_mkobj_ops(dentry, mode, arg, &bpf_map_iops,
-			     bpf_map_support_seq_show(map) ?
-			     &bpffs_map_fops : &bpffs_obj_fops);
+	err = bpf_mkobj_ops(dentry, mode, arg, &bpf_map_iops,
+			    shared_arena ? &bpffs_arena_fops :
+			    bpf_map_support_seq_show(map) ?
+			    &bpffs_map_fops : &bpffs_obj_fops);
+	if (!err && shared_arena)
+		i_size_write(d_inode(dentry), (loff_t)map->max_entries * PAGE_SIZE);
+	return err;
 }
 
 static int bpf_mklink(struct dentry *dentry, umode_t mode, void *arg)

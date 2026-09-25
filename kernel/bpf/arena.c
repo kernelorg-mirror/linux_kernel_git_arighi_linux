@@ -278,7 +278,8 @@ static struct bpf_map *arena_map_alloc(union bpf_attr *attr)
 	    /* BPF_F_MMAPABLE must be set */
 	    !(attr->map_flags & BPF_F_MMAPABLE) ||
 	    /* No unsupported flags present */
-	    (attr->map_flags & ~(BPF_F_SEGV_ON_FAULT | BPF_F_MMAPABLE | BPF_F_NO_USER_CONV)))
+	    (attr->map_flags & ~(BPF_F_SEGV_ON_FAULT | BPF_F_MMAPABLE |
+			   BPF_F_NO_USER_CONV | BPF_F_ARENA_NO_FREE)))
 		return ERR_PTR(-EINVAL);
 
 	if (attr->map_extra & ~PAGE_MASK)
@@ -488,7 +489,9 @@ static vm_fault_t arena_vm_fault(struct vm_fault *vmf)
 	int ret;
 
 	kbase = bpf_arena_get_kern_vm_start(arena);
-	kaddr = kbase + (u32)(vmf->address);
+	/* vmf->pgoff includes the file offset of a bpffs-backed slice. */
+	kaddr = kbase + (u32)(arena->user_vm_start +
+			      ((u64)vmf->pgoff << PAGE_SHIFT));
 
 	page = vmalloc_to_page((void *)kaddr);
 	if (!page && !(arena->map.map_flags & BPF_F_SEGV_ON_FAULT)) {
@@ -603,6 +606,13 @@ static unsigned long arena_get_unmapped_area(struct file *filp, unsigned long ad
 	struct bpf_arena *arena = container_of(map, struct bpf_arena, map);
 	long ret;
 
+	if (filp->f_op != &bpf_map_fops) {
+		if (!len || pgoff >= map->max_entries ||
+		    len > ((u64)map->max_entries - pgoff) << PAGE_SHIFT)
+			return -EINVAL;
+		return mm_get_unmapped_area(filp, addr, len, pgoff, flags);
+	}
+
 	if (pgoff)
 		return -EINVAL;
 	if (len > SZ_4G)
@@ -632,9 +642,14 @@ static unsigned long arena_get_unmapped_area(struct file *filp, unsigned long ad
 static int arena_map_mmap(struct bpf_map *map, struct vm_area_struct *vma)
 {
 	struct bpf_arena *arena = container_of(map, struct bpf_arena, map);
+	bool exported = vma->vm_file->f_op != &bpf_map_fops;
 
 	guard(mutex)(&arena->lock);
-	if (arena->user_vm_start && arena->user_vm_start != vma->vm_start)
+	if (exported && !arena->user_vm_start)
+		/* Set map_extra or mmap the map FD to establish the BPF address. */
+		return -EINVAL;
+	if (!exported && arena->user_vm_start &&
+	    arena->user_vm_start != vma->vm_start)
 		/*
 		 * If map_extra was not specified at arena creation time then
 		 * 1st user process can do mmap(NULL, ...) to pick user_vm_start
@@ -645,19 +660,31 @@ static int arena_map_mmap(struct bpf_map *map, struct vm_area_struct *vma)
 		 */
 		return -EBUSY;
 
-	if (arena->user_vm_end && arena->user_vm_end != vma->vm_end)
+	if (!exported && arena->user_vm_end &&
+	    arena->user_vm_end - arena->user_vm_start !=
+	    vma->vm_end - vma->vm_start)
 		/* all user processes must have the same size of mmap-ed region */
 		return -EBUSY;
 
 	/* Earlier checks should prevent this */
-	if (WARN_ON_ONCE(vma->vm_end - vma->vm_start > SZ_4G || vma->vm_pgoff))
+	if (WARN_ON_ONCE(vma->vm_end - vma->vm_start > SZ_4G))
 		return -EFAULT;
+	if (exported) {
+		if (vma->vm_pgoff >= map->max_entries ||
+		    (vma->vm_end - vma->vm_start) >> PAGE_SHIFT >
+		    map->max_entries - vma->vm_pgoff)
+			return -EINVAL;
+	} else if (WARN_ON_ONCE(vma->vm_pgoff)) {
+		return -EFAULT;
+	}
 
 	if (remember_vma(arena, vma))
 		return -ENOMEM;
 
-	arena->user_vm_start = vma->vm_start;
-	arena->user_vm_end = vma->vm_end;
+	if (!exported) {
+		arena->user_vm_start = vma->vm_start;
+		arena->user_vm_end = vma->vm_end;
+	}
 	/*
 	 * bpf_map_mmap() checks that it's being mmaped as VM_SHARED and
 	 * clears VM_MAYEXEC. Set VM_DONTEXPAND to avoid potential change
@@ -836,7 +863,11 @@ static void zap_pages(struct bpf_arena *arena, long uaddr, long page_cnt)
 	struct mm_struct *mm;
 	struct vma_list *vml;
 	unsigned long vm_start;
+	u64 start, end, vma_start, vma_end;
 	u64 my_gen;
+
+	start = uaddr - arena->user_vm_start;
+	end = start + size;
 
 	/*
 	 * Taking mmap_read_lock() under arena->lock would deadlock against
@@ -876,8 +907,14 @@ static void zap_pages(struct bpf_arena *arena, long uaddr, long page_cnt)
 		 */
 		vma = find_vma(mm, vm_start);
 		if (vma && vma->vm_start == vm_start &&
-		    vma->vm_file && vma->vm_file->private_data == &arena->map)
-			zap_vma_range(vma, uaddr, size);
+		    vma->vm_file && vma->vm_file->private_data == &arena->map) {
+			vma_start = (u64)vma->vm_pgoff << PAGE_SHIFT;
+			vma_end = vma_start + vma->vm_end - vma->vm_start;
+			if (start < vma_end && end > vma_start)
+				zap_vma_range(vma, vma->vm_start +
+					      (max(start, vma_start) - vma_start),
+					      min(end, vma_end) - max(start, vma_start));
+		}
 		mmap_read_unlock(mm);
 		mmput(mm);
 
@@ -1130,7 +1167,8 @@ __bpf_kfunc void bpf_arena_free_pages(void *p__map, void *ptr__ign, u32 page_cnt
 	struct bpf_map *map = p__map;
 	struct bpf_arena *arena = container_of(map, struct bpf_arena, map);
 
-	if (map->map_type != BPF_MAP_TYPE_ARENA || !page_cnt || !ptr__ign)
+	if (map->map_type != BPF_MAP_TYPE_ARENA || !page_cnt || !ptr__ign ||
+	    (map->map_flags & BPF_F_ARENA_NO_FREE))
 		return;
 	arena_free_pages(arena, (long)ptr__ign, page_cnt, true);
 }
@@ -1140,7 +1178,8 @@ void bpf_arena_free_pages_non_sleepable(void *p__map, void *ptr__ign, u32 page_c
 	struct bpf_map *map = p__map;
 	struct bpf_arena *arena = container_of(map, struct bpf_arena, map);
 
-	if (map->map_type != BPF_MAP_TYPE_ARENA || !page_cnt || !ptr__ign)
+	if (map->map_type != BPF_MAP_TYPE_ARENA || !page_cnt || !ptr__ign ||
+	    (map->map_flags & BPF_F_ARENA_NO_FREE))
 		return;
 	arena_free_pages(arena, (long)ptr__ign, page_cnt, false);
 }
