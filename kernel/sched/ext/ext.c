@@ -11,6 +11,7 @@
 #include <linux/rhashtable.h>
 #include <linux/sched/clock.h>
 #include <linux/sched/isolation.h>
+#include <linux/sched/numa_balancing.h>
 #include <linux/suspend.h>
 #include <linux/sysrq.h>
 
@@ -4303,6 +4304,81 @@ void scx_tick(struct rq *rq)
 	update_other_load_avgs(rq);
 }
 
+#ifdef CONFIG_NUMA_BALANCING
+/*
+ * Gates scx_task_numa_target(), so that the NUMA hinting-fault path pays
+ * nothing unless a scheduler has opted in with ops.set_numa_node(). Counts
+ * such schedulers, from scx_alloc_and_add_sched() to scx_sched_free_rcu_work().
+ */
+DEFINE_STATIC_KEY_FALSE(__scx_numa_balancing);
+
+static void scx_numa_balancing_inc(struct scx_sched *sch)
+{
+	/*
+	 * SCX_HAS_OP() reads has_op, which is filled after allocation and
+	 * cleared before RCU free. Check the copied callback to keep the
+	 * static-key increment and decrement balanced.
+	 */
+	if (sch->ops.set_numa_node)
+		static_branch_inc(&__scx_numa_balancing);
+}
+
+static void scx_numa_balancing_dec(struct scx_sched *sch)
+{
+	if (sch->ops.set_numa_node)
+		static_branch_dec(&__scx_numa_balancing);
+}
+
+/*
+ * Slow path of scx_task_numa_target(). Only a scheduler that has
+ * ops.set_numa_node() can request a target, and the target is cleared
+ * when @p leaves or joins a scheduler. Still check who owns @p, as
+ * scx_bpf_set_task_numa_target() doesn't hold @p's rq lock and can race a
+ * change of owner.
+ */
+int __scx_task_numa_target(const struct task_struct *p)
+{
+	struct scx_sched *sch;
+
+	if (!task_on_scx(p))
+		return NUMA_NO_NODE;
+
+	guard(rcu)();
+	sch = scx_task_sched_rcu(p);
+	if (!sch || !SCX_HAS_OP(sch, set_numa_node))
+		return NUMA_NO_NODE;
+
+	return READ_ONCE(p->scx.numa_target_nid);
+}
+
+/*
+ * Restart @p's NUMA hinting-fault scan at its initial rate after
+ * scx_bpf_set_task_numa_target() changed the target node. The kfunc can be
+ * called on any task from any context, where @p->mm can't be accessed safely,
+ * so the restart is deferred to @p's tick.
+ */
+static void scx_numa_reset_scan(struct task_struct *p)
+{
+	struct mm_struct *mm = p->mm;
+
+	if (likely(!READ_ONCE(p->scx.numa_scan_reset)))
+		return;
+
+	WRITE_ONCE(p->scx.numa_scan_reset, false);
+
+	if (!mm || (p->flags & (PF_EXITING | PF_KTHREAD)))
+		return;
+
+	p->numa_scan_period = task_scan_start(p);
+	if (time_after(mm->numa_next_scan, jiffies))
+		mm->numa_next_scan = jiffies;
+}
+#else
+static inline void scx_numa_balancing_inc(struct scx_sched *sch) {}
+static inline void scx_numa_balancing_dec(struct scx_sched *sch) {}
+static inline void scx_numa_reset_scan(struct task_struct *p) {}
+#endif
+
 static void task_tick_scx(struct rq *rq, struct task_struct *donor, int queued)
 {
 	struct scx_sched *sch = scx_task_sched(donor);
@@ -4328,8 +4404,10 @@ static void task_tick_scx(struct rq *rq, struct task_struct *donor, int queued)
 	 * matching the @queued check in task_tick_fair().
 	 */
 	if (!queued && SCX_HAS_OP(sch, set_numa_node) &&
-	    static_branch_unlikely(&sched_numa_balancing))
+	    static_branch_unlikely(&sched_numa_balancing)) {
+		scx_numa_reset_scan(donor);
 		task_tick_numa(rq, donor);
+	}
 
 	if (!donor->scx.slice) {
 		/* the slice can't be trusted while bypassing */
@@ -4445,6 +4523,14 @@ static void __scx_enable_task(struct scx_sched *sch, struct task_struct *p)
 	WARN_ON_ONCE(p->scx.flags & SCX_TASK_IN_CUSTODY);
 
 	/*
+	 * @p starts on @sch without a NUMA memory target. It was cleared when
+	 * @p left its previous scheduler, but scx_bpf_set_task_numa_target()
+	 * doesn't hold @p's rq lock and that scheduler may have raced it.
+	 */
+	WRITE_ONCE(p->scx.numa_target_nid, NUMA_NO_NODE);
+	p->scx.numa_scan_reset = false;
+
+	/*
 	 * Set the weight before calling ops.enable() so that the scheduler
 	 * doesn't see a stale value if they inspect the task struct.
 	 */
@@ -4518,6 +4604,8 @@ static void scx_disable_task(struct scx_sched *sch, struct task_struct *p)
 	scx_task_slice_ended(rq, p);
 	scx_set_task_slice(p, 0);
 	p->scx.reenq_cnt = 0;
+	WRITE_ONCE(p->scx.numa_target_nid, NUMA_NO_NODE);
+	p->scx.numa_scan_reset = false;
 
 	/*
 	 * Verify the task is not in BPF scheduler's custody. If flag
@@ -4602,6 +4690,7 @@ void init_scx_entity(struct sched_ext_entity *scx)
 	scx->sticky_cpu = -1;
 	scx->holding_cpu = -1;
 	scx->runnable_cpu = -1;
+	scx->numa_target_nid = NUMA_NO_NODE;
 	INIT_LIST_HEAD(&scx->runnable_node);
 	scx->runnable_at = jiffies;
 	scx->ddsp_dsq_id = SCX_DSQ_INVALID;
@@ -6108,6 +6197,7 @@ static void scx_sched_free_rcu_work(struct work_struct *work)
 
 	/* @sch is completely inactive by now */
 	scx_dec_has_subs(sch);
+	scx_numa_balancing_dec(sch);
 
 	kfree(sch);
 }
@@ -8032,6 +8122,8 @@ struct scx_sched *scx_alloc_and_add_sched(struct scx_enable_cmd *cmd,
 		sch->arena_kern_base = bpf_arena_map_kern_vm_start(sch->arena_map);
 #endif
 	cmd->arena_map = NULL;
+
+	scx_numa_balancing_inc(sch);
 	return sch;
 
 #ifdef CONFIG_EXT_SUB_SCHED
@@ -11292,6 +11384,84 @@ __bpf_kfunc s32 scx_bpf_task_cid(const struct task_struct *p)
 }
 
 /**
+ * scx_bpf_task_numa_nid - Node NUMA balancing would prefer a task to run on
+ * @p: task of interest
+ *
+ * Return p->numa_preferred_nid: the node NUMA balancing has derived from @p's
+ * hinting faults as the best one to run @p on, which is the node with the most
+ * faults, adjusted for CPU-less nodes and for the NUMA group @p may be part of.
+ * Return NUMA_NO_NODE when @p has no preference yet. A task has none until its
+ * address space has been scanned a few times and every task has none with
+ * kernel.numa_balancing disabled.
+ *
+ * The value is a hint, not an instruction: nothing in the kernel moves a task
+ * under a BPF scheduler to this node and the scheduler is free to weigh it
+ * against its own placement rules. The value is updated under @p's rq lock,
+ * which this kfunc doesn't take, so it is a snapshot.
+ */
+__bpf_kfunc s32 scx_bpf_task_numa_nid(const struct task_struct *p)
+{
+#ifdef CONFIG_NUMA_BALANCING
+	return READ_ONCE(p->numa_preferred_nid);
+#else
+	return NUMA_NO_NODE;
+#endif
+}
+
+/**
+ * scx_bpf_set_task_numa_target - Request a host-memory node for a task
+ * @p: task of interest
+ * @nid: destination node, or NUMA_NO_NODE to clear the request
+ * @aux: implicit BPF argument to access bpf_prog_aux hidden from BPF progs
+ *
+ * The request is advisory. NUMA hinting faults migrate eligible pages
+ * incrementally, subject to memory policy and migration constraints.
+ *
+ * How soon those faults happen depends on the rate @p's address space is
+ * scanned at, which backs off, up to a period of a minute by default, while
+ * the scan finds nothing to do. A request that changes the target node
+ * restarts the scan at its initial rate, so that it takes effect promptly.
+ *
+ * @p must be on the calling scheduler, which must have
+ * ops.set_numa_node() implemented. A scheduler calling this without the
+ * callback is aborted. The request is dropped when @p leaves the scheduler.
+ *
+ * Return 0 on success, -EINVAL if @nid is not a memory node or @p is not on
+ * sched_ext, -EPERM if @p is not on the calling scheduler, -EOPNOTSUPP if the
+ * kernel is built without NUMA balancing.
+ */
+__bpf_kfunc int scx_bpf_set_task_numa_target(struct task_struct *p, s32 nid,
+					     const struct bpf_prog_aux *aux)
+{
+	struct scx_sched *sch;
+
+	if (nid != NUMA_NO_NODE &&
+	    (nid < 0 || nid >= MAX_NUMNODES || !node_state(nid, N_MEMORY)))
+		return -EINVAL;
+	if (!task_on_scx(p))
+		return -EINVAL;
+
+	guard(rcu)();
+	sch = scx_prog_sched(aux);
+	if (unlikely(!sch || !scx_task_on_sched(sch, p)))
+		return -EPERM;
+
+	if (unlikely(!SCX_HAS_OP(sch, set_numa_node))) {
+		scx_error(sch, "scx_bpf_set_task_numa_target() called without ops.set_numa_node()");
+		return -EINVAL;
+	}
+
+	if (!IS_ENABLED(CONFIG_NUMA_BALANCING))
+		return -EOPNOTSUPP;
+
+	if (READ_ONCE(p->scx.numa_target_nid) != nid)
+		WRITE_ONCE(p->scx.numa_scan_reset, true);
+
+	WRITE_ONCE(p->scx.numa_target_nid, nid);
+	return 0;
+}
+
+/**
  * scx_bpf_locked_rq - Return the rq currently locked by SCX
  * @aux: implicit BPF argument to access bpf_prog_aux hidden from BPF progs
  *
@@ -11597,6 +11767,8 @@ BTF_ID_FLAGS(func, scx_bpf_put_cpumask, KF_RELEASE)
 BTF_ID_FLAGS(func, scx_bpf_task_running, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_task_cpu, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_task_cid, KF_RCU)
+BTF_ID_FLAGS(func, scx_bpf_task_numa_nid, KF_RCU)
+BTF_ID_FLAGS(func, scx_bpf_set_task_numa_target, KF_IMPLICIT_ARGS | KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_locked_rq, KF_IMPLICIT_ARGS | KF_RET_NULL)
 BTF_ID_FLAGS(func, scx_bpf_cpu_curr, KF_IMPLICIT_ARGS | KF_RET_NULL | KF_RCU_PROTECTED)
 BTF_ID_FLAGS(func, scx_bpf_cid_curr, KF_IMPLICIT_ARGS | KF_RET_NULL | KF_RCU_PROTECTED)
