@@ -838,7 +838,7 @@ unlock:
 bool folio_can_map_prot_numa(struct folio *folio, struct vm_area_struct *vma,
 		bool is_private_single_threaded)
 {
-	int nid;
+	int nid, target_nid;
 
 	if (!folio || folio_is_zone_device(folio) || folio_test_ksm(folio))
 		return false;
@@ -861,10 +861,14 @@ bool folio_can_map_prot_numa(struct folio *folio, struct vm_area_struct *vma,
 
 	/*
 	 * Don't mess with PTEs if folio is already on the node
-	 * a single-threaded process is running on.
+	 * a single-threaded process is running on, unless a placement
+	 * policy has requested a different node for the task's memory: in
+	 * that case the hinting faults are what moves the folio there.
 	 */
 	nid = folio_nid(folio);
-	if (is_private_single_threaded && (nid == numa_node_id()))
+	target_nid = task_numa_migrate_target(current);
+	if (is_private_single_threaded && (nid == numa_node_id()) &&
+	    (target_nid == NUMA_NO_NODE || target_nid == nid))
 		return false;
 
 	/*
@@ -2987,6 +2991,8 @@ int mpol_misplaced(struct folio *folio, struct vm_fault *vmf,
 	struct vm_area_struct *vma = vmf->vma;
 	int thiscpu = raw_smp_processor_id();
 	int thisnid = numa_node_id();
+	int target_nid = task_numa_migrate_target(current);
+	bool hinted_target = false;
 	int polnid = NUMA_NO_NODE;
 	int ret = NUMA_NO_NODE;
 
@@ -2999,6 +3005,16 @@ int mpol_misplaced(struct folio *folio, struct vm_fault *vmf,
 	if (!(pol->flags & MPOL_F_MOF))
 		goto out;
 
+	/*
+	 * A task's migration target may redirect the default NUMA balancing
+	 * policy, but must not override an explicit task or VMA memory policy.
+	 */
+	if (target_nid >= 0 && target_nid < MAX_NUMNODES &&
+	    pol == &preferred_node_policy[thisnid] &&
+	    node_state(target_nid, N_MEMORY) &&
+	    node_isset(target_nid, cpuset_current_mems_allowed))
+		hinted_target = true;
+
 	switch (pol->mode) {
 	case MPOL_INTERLEAVE:
 		polnid = interleave_nid(pol, ilx);
@@ -3009,7 +3025,7 @@ int mpol_misplaced(struct folio *folio, struct vm_fault *vmf,
 		break;
 
 	case MPOL_PREFERRED:
-		if (node_isset(curnid, pol->nodes))
+		if (!hinted_target && node_isset(curnid, pol->nodes))
 			goto out;
 		polnid = first_node(pol->nodes);
 		break;
@@ -3059,10 +3075,11 @@ int mpol_misplaced(struct folio *folio, struct vm_fault *vmf,
 
 	/* Migrate the folio towards the node whose CPU is referencing it */
 	if (pol->flags & MPOL_F_MORON) {
-		polnid = thisnid;
+		polnid = hinted_target ? target_nid : thisnid;
 
 		if (!should_numa_migrate_memory(current, folio, curnid,
-						thiscpu))
+						thiscpu, polnid,
+						hinted_target && thisnid == target_nid))
 			goto out;
 	}
 
