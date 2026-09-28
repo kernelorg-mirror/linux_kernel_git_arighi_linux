@@ -488,6 +488,16 @@ static inline s32 scx_bpf_task_numa_nid(const struct task_struct *p)
 	return NUMA_NO_NODE;
 }
 
+/* v7.5: Add scx_bpf_set_task_numa_target(). */
+int scx_bpf_set_task_numa_target___new(struct task_struct *p, s32 nid) __ksym __weak;
+
+static inline int scx_bpf_set_task_numa_target(struct task_struct *p, s32 nid)
+{
+	if (bpf_ksym_exists(scx_bpf_set_task_numa_target___new))
+		return scx_bpf_set_task_numa_target___new(p, nid);
+	return -EOPNOTSUPP;
+}
+
 /* v7.4: Add scx_bpf_task_set_lazy_resched(). */
 bool scx_bpf_task_set_lazy_resched___new(struct task_struct *p, bool lazy) __ksym __weak;
 

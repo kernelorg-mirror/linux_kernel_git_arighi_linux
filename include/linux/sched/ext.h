@@ -9,6 +9,7 @@
 #ifndef _LINUX_SCHED_EXT_H
 #define _LINUX_SCHED_EXT_H
 
+#include <linux/jump_label.h>
 #include <linux/numa.h>
 
 #ifdef CONFIG_SCHED_CLASS_EXT
@@ -224,6 +225,7 @@ struct sched_ext_entity {
 	s32			selected_cpu;
 	s32			runnable_cpu;	/* cpu @p is runnable on, -1 if not */
 	u32			ops_qseq;	/* protected by rq lock */
+	s32			numa_target_nid; /* see scx_bpf_set_task_numa_target() */
 	struct task_struct	*kf_tasks[2];	/* see SCX_CALL_OP_TASK() */
 
 	struct list_head	runnable_node;	/* rq->scx.runnable_list */
@@ -294,6 +296,9 @@ struct sched_ext_entity {
 	 */
 	bool			lazy_resched;
 
+	/* NUMA scan restart pending, see scx_bpf_set_task_numa_target() */
+	bool			numa_scan_reset;
+
 	/* cold fields */
 #ifdef CONFIG_EXT_GROUP_SCHED
 	struct cgroup		*cgrp_moving_from;
@@ -317,12 +322,23 @@ static inline bool scx_rcu_cpu_stall(const struct cpumask *stalled_mask) { retur
 
 #endif	/* CONFIG_SCHED_CLASS_EXT */
 
+#if defined(CONFIG_SCHED_CLASS_EXT) && defined(CONFIG_NUMA_BALANCING)
+/* a BPF scheduler with ops.set_numa_node() is loaded */
+DECLARE_STATIC_KEY_FALSE(__scx_numa_balancing);
+
+int __scx_task_numa_target(const struct task_struct *p);
+#endif
+
 /*
  * Node the pages @p accesses should migrate to, if @p's BPF scheduler has
  * requested one, or NUMA_NO_NODE to migrate them toward the accessing CPU.
  */
 static inline int scx_task_numa_target(const struct task_struct *p)
 {
+#if defined(CONFIG_SCHED_CLASS_EXT) && defined(CONFIG_NUMA_BALANCING)
+	if (static_branch_unlikely(&__scx_numa_balancing))
+		return __scx_task_numa_target(p);
+#endif
 	return NUMA_NO_NODE;
 }
 
