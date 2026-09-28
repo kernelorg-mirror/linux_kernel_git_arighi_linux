@@ -9,6 +9,8 @@
 #ifndef _LINUX_SCHED_EXT_H
 #define _LINUX_SCHED_EXT_H
 
+#include <linux/numa.h>
+
 #ifdef CONFIG_SCHED_CLASS_EXT
 
 #include <linux/llist.h>
@@ -314,6 +316,15 @@ static inline bool scx_hardlockup(int cpu) { return false; }
 static inline bool scx_rcu_cpu_stall(const struct cpumask *stalled_mask) { return false; }
 
 #endif	/* CONFIG_SCHED_CLASS_EXT */
+
+/*
+ * Node the pages @p accesses should migrate to, if @p's BPF scheduler has
+ * requested one, or NUMA_NO_NODE to migrate them toward the accessing CPU.
+ */
+static inline int scx_task_numa_target(const struct task_struct *p)
+{
+	return NUMA_NO_NODE;
+}
 
 struct scx_task_group {
 #ifdef CONFIG_EXT_GROUP_SCHED

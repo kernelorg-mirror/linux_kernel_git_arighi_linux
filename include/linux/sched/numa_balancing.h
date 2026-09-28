@@ -25,13 +25,23 @@ enum numa_vmaskip_reason {
 	NUMAB_SKIP_SEQ_COMPLETED,
 };
 
+/*
+ * Node the pages @p accesses should migrate to, if a placement policy has
+ * requested one, or NUMA_NO_NODE to migrate them toward the accessing CPU.
+ */
+static inline int task_numa_migrate_target(const struct task_struct *p)
+{
+	return scx_task_numa_target(p);
+}
+
 #ifdef CONFIG_NUMA_BALANCING
 extern void task_numa_fault(int last_node, int node, int pages, int flags);
 extern pid_t task_numa_group_id(struct task_struct *p);
 extern void set_numabalancing_state(bool enabled);
 extern void task_numa_free(struct task_struct *p, bool final);
 bool should_numa_migrate_memory(struct task_struct *p, struct folio *folio,
-				int src_nid, int dst_cpu);
+				int src_nid, int dst_cpu, int dst_nid,
+				bool prefer_migration);
 #else
 static inline void task_numa_fault(int last_node, int node, int pages,
 				   int flags)
@@ -48,7 +58,8 @@ static inline void task_numa_free(struct task_struct *p, bool final)
 {
 }
 static inline bool should_numa_migrate_memory(struct task_struct *p,
-				struct folio *folio, int src_nid, int dst_cpu)
+				struct folio *folio, int src_nid, int dst_cpu,
+				int dst_nid, bool prefer_migration)
 {
 	return true;
 }

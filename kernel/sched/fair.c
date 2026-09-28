@@ -2921,10 +2921,10 @@ static void numa_promotion_adjust_threshold(struct pglist_data *pgdat,
 }
 
 bool should_numa_migrate_memory(struct task_struct *p, struct folio *folio,
-				int src_nid, int dst_cpu)
+				int src_nid, int dst_cpu, int dst_nid,
+				bool prefer_migration)
 {
 	struct numa_group *ng = deref_curr_numa_group(p);
-	int dst_nid = cpu_to_node(dst_cpu);
 	int last_cpupid, this_cpupid;
 
 	/*
@@ -2965,6 +2965,14 @@ bool should_numa_migrate_memory(struct task_struct *p, struct folio *folio,
 
 	this_cpupid = cpu_pid_to_cpupid(dst_cpu, current->pid);
 	last_cpupid = folio_xchg_last_cpupid(folio, this_cpupid);
+
+	/*
+	 * A placement policy has already put this task at its requested node.
+	 * Favor migrating accessed memory there over the normal task versus
+	 * memory placement heuristic. The MM's migration checks still apply.
+	 */
+	if (prefer_migration)
+		return true;
 
 	if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) &&
 	    !node_is_toptier(src_nid) && !cpupid_valid(last_cpupid))
