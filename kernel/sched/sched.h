@@ -2141,6 +2141,7 @@ extern int migrate_swap(struct task_struct *p, struct task_struct *t,
 			int cpu, int scpu);
 extern void init_numa_balancing(u64 clone_flags, struct task_struct *p);
 extern void task_tick_numa(struct rq *rq, struct task_struct *curr);
+extern unsigned int task_scan_start(struct task_struct *p);
 
 #else /* !CONFIG_NUMA_BALANCING: */
 

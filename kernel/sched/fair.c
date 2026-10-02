@@ -2340,7 +2340,7 @@ static unsigned int task_scan_min(struct task_struct *p)
 	return max_t(unsigned int, floor, scan);
 }
 
-static unsigned int task_scan_start(struct task_struct *p)
+unsigned int task_scan_start(struct task_struct *p)
 {
 	unsigned long smin = task_scan_min(p);
 	unsigned long period = smin;
