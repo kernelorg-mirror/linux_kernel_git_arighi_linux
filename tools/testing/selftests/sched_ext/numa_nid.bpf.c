@@ -11,6 +11,10 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
+struct sched_ext_entity___numa {
+	s32 numa_target_nid;
+} __attribute__((preserve_access_index));
+
 struct task_ctx {
 	bool enabled;
 	bool notified;
@@ -30,6 +34,17 @@ u64 nr_updates;
 /* Notifications with and without a preferred node. */
 u64 nr_with_nid;
 u64 nr_without_nid;
+
+const volatile s32 target_nid = NUMA_NO_NODE;
+const volatile u32 test_tid;
+s32 target_result = 1;
+s32 invalid_result = 1;
+s32 clear_result = 1;
+s32 observed_target = -2;
+s32 observed_clear = -2;
+/* Last node reported to the test task by a notification after the first. */
+s32 observed_update = -2;
+bool clear_target;
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(numa_nid_init_task, struct task_struct *p,
 			     struct scx_init_task_args *args)
@@ -82,6 +97,8 @@ void BPF_STRUCT_OPS(numa_nid_set_numa_node, struct task_struct *p, s32 nid)
 			return;
 		}
 		__sync_fetch_and_add(&nr_updates, 1);
+		if (p->pid == test_tid)
+			observed_update = nid;
 	} else {
 		__sync_fetch_and_add(&nr_initial, 1);
 	}
@@ -105,6 +122,8 @@ void BPF_STRUCT_OPS(numa_nid_set_numa_node, struct task_struct *p, s32 nid)
 void BPF_STRUCT_OPS(numa_nid_running, struct task_struct *p)
 {
 	struct task_ctx *tctx = task_ctx(p);
+	struct sched_ext_entity___numa *numa_scx = (void *)&p->scx;
+	s32 result;
 
 	if (!tctx)
 		return;
@@ -112,6 +131,23 @@ void BPF_STRUCT_OPS(numa_nid_running, struct task_struct *p)
 		scx_bpf_error("task %d ran before initial node notification", p->pid);
 	if (scx_bpf_task_numa_nid(p) != tctx->nid)
 		scx_bpf_error("task %d kfunc node differs from notification", p->pid);
+
+	if (p->pid == test_tid && target_result == 1 &&
+	    target_nid != NUMA_NO_NODE) {
+		invalid_result = scx_bpf_set_task_numa_target(p, -2);
+		result = scx_bpf_set_task_numa_target(p, target_nid);
+		if (!result &&
+		    bpf_core_field_exists(numa_scx->numa_target_nid))
+			observed_target = BPF_CORE_READ(numa_scx, numa_target_nid);
+		target_result = result;
+	}
+	if (p->pid == test_tid && clear_target && !target_result && clear_result == 1) {
+		result = scx_bpf_set_task_numa_target(p, NUMA_NO_NODE);
+		if (!result &&
+		    bpf_core_field_exists(numa_scx->numa_target_nid))
+			observed_clear = BPF_CORE_READ(numa_scx, numa_target_nid);
+		clear_result = result;
+	}
 }
 
 void BPF_STRUCT_OPS(numa_nid_disable, struct task_struct *p)
