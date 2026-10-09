@@ -617,6 +617,25 @@ struct sched_ext_ops {
 	void (*set_weight)(struct task_struct *p, u32 weight);
 
 	/**
+	 * @set_numa_node: Report a task's preferred NUMA node
+	 * @p: task whose preferred node is being reported
+	 * @nid: preferred node, or NUMA_NO_NODE if there is no preference
+	 *
+	 * Called after ops.enable() to report the current preference and when
+	 * the preference changes. The task's rq lock is held, and updates are
+	 * reported before the task is re-enqueued, if it is runnable.
+	 *
+	 * Implementing this op enables NUMA hinting-fault scans for the
+	 * scheduler's tasks when CONFIG_NUMA_BALANCING and kernel.numa_balancing
+	 * are enabled. The faults maintain NUMA statistics and the preferred
+	 * node, and can migrate accessed memory toward the accessing CPU.
+	 * Task placement remains the BPF scheduler's responsibility; @nid is
+	 * advisory. Without CONFIG_NUMA_BALANCING, only the initial
+	 * NUMA_NO_NODE notification is delivered.
+	 */
+	void (*set_numa_node)(struct task_struct *p, s32 nid);
+
+	/**
 	 * @set_cpumask: Set CPU affinity
 	 * @p: task to set CPU affinity for
 	 * @cpumask: cpumask of cpus that @p can run on
@@ -1180,6 +1199,7 @@ struct sched_ext_ops_cid {
 	bool (*core_sched_before)(struct task_struct *a,
 				   struct task_struct *b);
 	void (*set_weight)(struct task_struct *p, u32 weight);
+	void (*set_numa_node)(struct task_struct *p, s32 nid);
 	void (*set_cmask)(struct task_struct *p,
 			   const struct scx_cmask *cmask__arena);
 	void (*update_idle)(s32 cid, bool idle);

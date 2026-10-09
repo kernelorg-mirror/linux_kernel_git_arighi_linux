@@ -4318,6 +4318,19 @@ static void task_tick_scx(struct rq *rq, struct task_struct *donor, int queued)
 	else if (SCX_HAS_OP(sch, tick))
 		SCX_CALL_OP_TASK(sch, tick, rq, donor);
 
+	/*
+	 * If requested by the scheduler, drive the NUMA hinting-fault scan as
+	 * task_tick_fair() does. Neither the scan nor the statistics it feeds
+	 * depend on the scheduling class. Where the task then runs is left to
+	 * that scheduler: numa_migrate_preferred() does not move a task it owns.
+	 *
+	 * The tick that only refreshes an already queued task does not scan,
+	 * matching the @queued check in task_tick_fair().
+	 */
+	if (!queued && SCX_HAS_OP(sch, set_numa_node) &&
+	    static_branch_unlikely(&sched_numa_balancing))
+		task_tick_numa(rq, donor);
+
 	if (!donor->scx.slice) {
 		/* the slice can't be trusted while bypassing */
 		if (READ_ONCE(donor->scx.lazy_resched) &&
@@ -4467,6 +4480,15 @@ static void __scx_enable_task(struct scx_sched *sch, struct task_struct *p)
 
 	if (SCX_HAS_OP(sch, set_weight))
 		SCX_CALL_OP_TASK(sch, set_weight, rq, p, p->scx.weight);
+
+	if (SCX_HAS_OP(sch, set_numa_node)) {
+		s32 nid = NUMA_NO_NODE;
+
+#ifdef CONFIG_NUMA_BALANCING
+		nid = p->numa_preferred_nid;
+#endif
+		SCX_CALL_OP_TASK(sch, set_numa_node, rq, p, nid);
+	}
 }
 
 void scx_enable_task(struct scx_sched *sch, struct task_struct *p)
@@ -4763,6 +4785,21 @@ void sched_ext_dead(struct task_struct *p)
 		scx_set_task_state(p, SCX_TASK_DEAD);
 		task_rq_unlock(rq, p, &rf);
 	}
+}
+
+void scx_set_numa_node(struct task_struct *p, s32 nid)
+{
+	struct rq *rq = task_rq(p);
+	struct scx_sched *sch = scx_task_sched(p);
+
+	lockdep_assert_rq_held(rq);
+
+	if (task_dead_and_done(p) ||
+	    scx_get_task_state(p) != SCX_TASK_ENABLED)
+		return;
+
+	if (SCX_HAS_OP(sch, set_numa_node))
+		SCX_CALL_OP_TASK(sch, set_numa_node, rq, p, nid);
 }
 
 static void reweight_task_scx(struct rq *rq, struct task_struct *p,
@@ -8929,6 +8966,7 @@ static void sched_ext_ops__quiescent(struct task_struct *p, u64 deq_flags) {}
 static bool sched_ext_ops__yield(struct task_struct *from, struct task_struct *to__nullable) { return false; }
 static bool sched_ext_ops__core_sched_before(struct task_struct *a, struct task_struct *b) { return false; }
 static void sched_ext_ops__set_weight(struct task_struct *p, u32 weight) {}
+static void sched_ext_ops__set_numa_node(struct task_struct *p, s32 nid) {}
 static void sched_ext_ops__set_cpumask(struct task_struct *p, const struct cpumask *mask) {}
 static void sched_ext_ops__update_idle(s32 cpu, bool idle) {}
 static void sched_ext_ops__cpu_acquire(s32 cpu, struct scx_cpu_acquire_args *args) {}
@@ -8971,6 +9009,7 @@ static struct sched_ext_ops __bpf_ops_sched_ext_ops = {
 	.yield			= sched_ext_ops__yield,
 	.core_sched_before	= sched_ext_ops__core_sched_before,
 	.set_weight		= sched_ext_ops__set_weight,
+	.set_numa_node		= sched_ext_ops__set_numa_node,
 	.set_cpumask		= sched_ext_ops__set_cpumask,
 	.update_idle		= sched_ext_ops__update_idle,
 	.cpu_acquire		= sched_ext_ops__cpu_acquire,
@@ -9041,6 +9080,7 @@ static struct sched_ext_ops_cid __bpf_ops_sched_ext_ops_cid = {
 	.yield			= sched_ext_ops__yield,
 	.core_sched_before	= sched_ext_ops__core_sched_before,
 	.set_weight		= sched_ext_ops__set_weight,
+	.set_numa_node		= sched_ext_ops__set_numa_node,
 	.set_cmask		= sched_ext_ops_cid__set_cmask,
 	.update_idle		= sched_ext_ops__update_idle,
 	.init_task		= sched_ext_ops__init_task,
@@ -11792,6 +11832,7 @@ static int __init scx_init(void)
 	CID_OFFSET_MATCH(yield, yield);
 	CID_OFFSET_MATCH(core_sched_before, core_sched_before);
 	CID_OFFSET_MATCH(set_weight, set_weight);
+	CID_OFFSET_MATCH(set_numa_node, set_numa_node);
 	CID_OFFSET_MATCH(update_idle, update_idle);
 	CID_OFFSET_MATCH(init_task, init_task);
 	CID_OFFSET_MATCH(exit_task, exit_task);
