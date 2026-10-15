@@ -409,6 +409,12 @@ static struct scx_dispatch_q *bypass_enq_target_dsq(struct scx_sched *sch, s32 c
 	return scx_bypass_dsq(sch, cpu);
 }
 
+static struct task_struct *first_local_task(struct rq *rq)
+{
+	return list_first_entry_or_null(&rq->scx.local_dsq.list,
+					struct task_struct, scx.dsq_list.node);
+}
+
 /**
  * rq_is_open - Is the rq available for immediate execution of an SCX task?
  * @rq: rq to test
@@ -440,6 +446,18 @@ static bool rq_is_open(struct rq *rq, u64 enq_flags)
 	/*
 	 * @rq is either picking, in transition to, or running an SCX task.
 	 */
+
+	/*
+	 * A local insertion can raise next_class to ext while the donor is
+	 * still idle, including after proxy_resched_idle(). The local DSQ head
+	 * is next to run if its cookie matches, so keep it through IMMED reenq.
+	 */
+	if (rq->donor == rq->idle) {
+		struct task_struct *first = first_local_task(rq);
+
+		if (first && sched_cpu_cookie_match(rq, first))
+			return true;
+	}
 
 	/*
 	 * If we're in the dispatch path holding rq lock, $donor may or may not
@@ -3721,12 +3739,6 @@ retry:
 		goto retry;
 }
 
-static struct task_struct *first_local_task(struct rq *rq)
-{
-	return list_first_entry_or_null(&rq->scx.local_dsq.list,
-					struct task_struct, scx.dsq_list.node);
-}
-
 /*
  * Run dispatch and queue the follow-up work for a pick.
  */
@@ -3904,6 +3916,25 @@ do_pick_task_scx(struct rq *rq, struct rq_flags *rf, bool force_scx)
 
 	return p;
 }
+
+#ifdef CONFIG_SCHED_PROXY_EXEC
+static int balance_scx(struct rq *rq, struct rq_flags *rf)
+{
+	/*
+	 * Proxy resolution can abandon a blocked-donor pick without putting
+	 * it. Clear the provisional state before the next pick, which may
+	 * select a higher class and force idle without calling pick_task_scx().
+	 * A genuine proxy_resched_idle() put happens before this balance pass.
+	 *
+	 * Core-sched's cached-pick path skips balance, but the abandoned pick
+	 * has consumed core_pick. Paths which drop rq lock first put the donor
+	 * through idle, clearing PROXY_PENDING before another cached pick can
+	 * be installed.
+	 */
+	rq->scx.flags &= ~SCX_RQ_PROXY_PENDING;
+	return 0;
+}
+#endif
 
 static struct task_struct *pick_task_scx(struct rq *rq, struct rq_flags *rf)
 {
@@ -5650,6 +5681,9 @@ DEFINE_SCHED_CLASS(ext) = {
 
 	.wakeup_preempt		= wakeup_preempt_scx,
 
+#ifdef CONFIG_SCHED_PROXY_EXEC
+	.balance		= balance_scx,
+#endif
 	.pick_task		= pick_task_scx,
 
 	.put_prev_task		= put_prev_task_scx,
