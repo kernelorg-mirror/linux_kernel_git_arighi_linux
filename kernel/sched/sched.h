@@ -2814,6 +2814,13 @@ struct sched_class {
 	void (*task_change_group)(struct task_struct *p);
 #endif
 
+#ifdef CONFIG_NUMA_BALANCING
+	/*
+	 * sched_setnuma: task_rq_lock + sched_change
+	 */
+	void (*numa_node_changed)(struct rq *rq, struct task_struct *p, int nid);
+#endif
+
 #ifdef CONFIG_SCHED_CORE
 	/*
 	 * pick_next_task: rq->lock
