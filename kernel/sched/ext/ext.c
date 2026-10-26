@@ -11531,6 +11531,47 @@ __bpf_kfunc s32 scx_bpf_task_cid(const struct task_struct *p)
 }
 
 /**
+ * scx_bpf_task_numa_nid - Node NUMA balancing would prefer a task to run on
+ * @p: task of interest
+ *
+ * Return p->numa_preferred_nid: the node NUMA balancing has derived from @p's
+ * hinting faults as the best one to run @p on, which is the node with the most
+ * faults, adjusted for CPU-less nodes and for the NUMA group @p may be part of.
+ * Return NUMA_NO_NODE when @p has no preference yet. A task has none until its
+ * address space has been scanned a few times. Disabling kernel.numa_balancing
+ * stops the scan, which leaves the last preference in place.
+ *
+ * A task on a BPF scheduler that doesn't implement ops.set_numa_node() isn't
+ * scanned, so its preference would be left over from its previous scheduling
+ * class. Return NUMA_NO_NODE for such a task. For a task that isn't on
+ * sched_ext, return its preference as is.
+ *
+ * The value is a hint, not an instruction: nothing in the kernel moves a task
+ * under a BPF scheduler to this node and the scheduler is free to weigh it
+ * against its own placement rules. The value is read without @p's rq lock, so
+ * it is a snapshot. In particular, a task that just changed scheduling class
+ * may report a preference from before the change until its new class has
+ * rescanned its address space.
+ */
+__bpf_kfunc s32 scx_bpf_task_numa_nid(const struct task_struct *p)
+{
+#ifdef CONFIG_NUMA_BALANCING
+	if (task_on_scx(p)) {
+		struct scx_sched *sch;
+
+		guard(rcu)();
+		sch = scx_task_sched_rcu(p);
+		if (!sch || !SCX_HAS_OP(sch, set_numa_node))
+			return NUMA_NO_NODE;
+	}
+
+	return READ_ONCE(p->numa_preferred_nid);
+#else
+	return NUMA_NO_NODE;
+#endif
+}
+
+/**
  * scx_bpf_locked_rq - Return the rq currently locked by SCX
  * @aux: implicit BPF argument to access bpf_prog_aux hidden from BPF progs
  *
@@ -11836,6 +11877,7 @@ BTF_ID_FLAGS(func, scx_bpf_put_cpumask, KF_RELEASE)
 BTF_ID_FLAGS(func, scx_bpf_task_running, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_task_cpu, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_task_cid, KF_RCU)
+BTF_ID_FLAGS(func, scx_bpf_task_numa_nid, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_locked_rq, KF_IMPLICIT_ARGS | KF_RET_NULL)
 BTF_ID_FLAGS(func, scx_bpf_cpu_curr, KF_IMPLICIT_ARGS | KF_RET_NULL | KF_RCU_PROTECTED)
 BTF_ID_FLAGS(func, scx_bpf_cid_curr, KF_IMPLICIT_ARGS | KF_RET_NULL | KF_RCU_PROTECTED)
