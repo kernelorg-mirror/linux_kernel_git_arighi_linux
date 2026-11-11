@@ -191,7 +191,8 @@ $(INCLUDE_DIR)/%.bpf.skel.h: $(SCXOBJ_DIR)/%.bpf.o $(INCLUDE_DIR)/vmlinux.h $(BP
 
 SCX_COMMON_DEPS := include/scx/common.h include/scx/user_exit_info.h | $(BINDIR)
 
-c-sched-targets = scx_simple scx_cpu0 scx_qmap scx_central scx_flatcg scx_userland scx_pair scx_sdt
+c-sched-targets = scx_simple scx_cpu0 scx_qmap scx_central scx_flatcg scx_userland scx_pair scx_sdt \
+		  scx_pvhost scx_pvguest
 
 $(addprefix $(BINDIR)/,$(c-sched-targets)): \
 	$(BINDIR)/%: \
@@ -203,6 +204,10 @@ $(addprefix $(BINDIR)/,$(c-sched-targets)): \
 	$(CC) -o $@ $(SCXOBJ_DIR)/$(sched).o $(BPFOBJ) $(LDFLAGS)
 
 $(c-sched-targets): %: $(BINDIR)/%
+
+# Headers shared by the paravirt pair
+$(SCXOBJ_DIR)/scx_pvhost.bpf.o $(SCXOBJ_DIR)/scx_pvguest.bpf.o: scx_pv.h scx_pvsched.bpf.h
+$(BINDIR)/scx_pvhost $(BINDIR)/scx_pvguest: scx_pv.h scx_pv_topo.h
 
 install: all
 	$(Q)mkdir -p $(DESTDIR)/usr/local/bin/

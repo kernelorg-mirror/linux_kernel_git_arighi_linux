@@ -197,6 +197,13 @@ Similar to scx_simple, in limited scenarios, this scheduler can perform
 reasonably well on single socket-socket systems with a unified L3 cache and show
 significantly lowered hierarchical scheduling overhead.
 
+## scx_pvhost and scx_pvguest
+
+A pair of paravirt schedulers: scx_pvhost runs on a KVM host, scx_pvguest
+in its guests. They share what each of them knows about the CPUs through
+memory shared between their BPF arenas, without any change to QEMU or
+KVM. See scx-pvsched.md for how they work, results and how to test them.
+
 
 # Troubleshooting
 
