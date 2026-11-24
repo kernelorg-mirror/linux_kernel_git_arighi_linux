@@ -20,6 +20,7 @@ u64 nr_blocked_enqueues_donor_cpu;
 u64 nr_blocked_enqueues_owner_cpu;
 u64 nr_blocked_enqueues_other_cpu;
 u64 nr_blocked_wakeups;
+u64 nr_unadmitted_enqueues;
 static u64 vtime_now;
 
 UEI_DEFINE(uei);
@@ -33,6 +34,14 @@ s32 BPF_STRUCT_OPS(enq_blocked_select_cpu,
 void BPF_STRUCT_OPS(enq_blocked_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	u64 vtime = p->scx.dsq_vtime;
+
+	/*
+	 * A retained proxy donor must only be enqueued with SCX_ENQ_BLOCKED. A
+	 * full wakeup enqueue happens before is_blocked is cleared.
+	 */
+	if (p->pid == donor_pid && p->is_blocked &&
+	    !(enq_flags & (SCX_ENQ_BLOCKED | SCX_ENQ_WAKEUP)))
+		__sync_fetch_and_add(&nr_unadmitted_enqueues, 1);
 
 	if (enq_flags & SCX_ENQ_BLOCKED) {
 		int cpu = scx_bpf_task_cpu(p);

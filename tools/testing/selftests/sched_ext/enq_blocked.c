@@ -497,7 +497,7 @@ static enum scx_test_status run_one(bool enq_blocked, bool cross_cpu,
 	size_t i, nr_contenders, nr_contenders_started = 0;
 	size_t nr_contenders_joined = 0;
 	u64 nr_blocked, nr_blocked_donor_cpu, nr_blocked_owner_cpu;
-	u64 nr_blocked_other_cpu, nr_blocked_wakeups;
+	u64 nr_blocked_other_cpu, nr_blocked_wakeups, nr_unadmitted;
 	struct enq_blocked_stats stats;
 
 	err = select_test_cpus(cross_cpu, &allowed_cpus, &thread_ctx.donor_cpu,
@@ -815,6 +815,7 @@ out:
 	nr_blocked_owner_cpu = skel->bss->nr_blocked_enqueues_owner_cpu;
 	nr_blocked_other_cpu = skel->bss->nr_blocked_enqueues_other_cpu;
 	nr_blocked_wakeups = skel->bss->nr_blocked_wakeups;
+	nr_unadmitted = skel->bss->nr_unadmitted_enqueues;
 	result->nr_blocked_enqueues = nr_blocked;
 	result->nr_blocked_enqueues_donor_cpu = nr_blocked_donor_cpu;
 	result->nr_blocked_enqueues_owner_cpu = nr_blocked_owner_cpu;
@@ -830,8 +831,14 @@ out:
 	       (unsigned long long)nr_blocked_other_cpu);
 	printf("  nr_blocked_wakeups=%llu\n",
 	       (unsigned long long)nr_blocked_wakeups);
+	printf("  nr_unadmitted_enqueues=%llu\n",
+	       (unsigned long long)nr_unadmitted);
 	if (status == SCX_TEST_PASS) {
-		if (enq_blocked && proxy_enabled && !nr_blocked) {
+		if (nr_unadmitted) {
+			SCX_ERR("ops.enqueue() received %llu blocked donors without SCX_ENQ_BLOCKED",
+				(unsigned long long)nr_unadmitted);
+			status = SCX_TEST_FAIL;
+		} else if (enq_blocked && proxy_enabled && !nr_blocked) {
 			SCX_ERR("ops.enqueue() did not receive the blocked donor");
 			status = SCX_TEST_FAIL;
 		} else if ((!enq_blocked || !proxy_enabled) && nr_blocked) {
