@@ -220,7 +220,6 @@ static const struct __scx_enum_abi_val __scx_enum_abi_vals[]
 	{ "scx_rq_flags", "SCX_RQ_PROXY_RETRY", 0x200LLU },
 	{ "scx_rq_flags", "SCX_RQ_PROXY_TICK", 0x400LLU },
 	{ "scx_rq_flags", "SCX_RQ_PROXY_PENDING", 0x800LLU },
-	{ "scx_rq_flags", "SCX_RQ_PROXY_BLOCKING", 0x1000LLU },
 	{ "scx_rq_flags", "SCX_RQ_IN_WAKEUP", 0x10000LLU },
 	{ "scx_rq_flags", "SCX_RQ_IN_DISPATCH", 0x20000LLU },
 	{ "scx_sched_pcpu_flags", "SCX_SCHED_PCPU_BYPASSING", 0x1LLU },

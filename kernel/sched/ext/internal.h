@@ -240,6 +240,9 @@ enum scx_ops_flags {
 	 *
 	 * For blocked donors, this flag takes precedence over
 	 * %SCX_OPS_ENQ_EXITING and %SCX_OPS_ENQ_MIGRATION_DISABLED.
+	 *
+	 * The root scheduler decides for the whole hierarchy. A sub-scheduler
+	 * must match the root's setting or it fails to load.
 	 */
 	SCX_OPS_ENQ_BLOCKED		= 1LLU << 10,
 
@@ -2296,7 +2299,6 @@ struct task_struct *scx_task_iter_next_locked(struct scx_task_iter *iter);
 bool scx_set_task_slice(struct task_struct *p, u64 slice);
 void scx_task_slice_ended(struct rq *rq, struct task_struct *p);
 void scx_task_unlink_from_dsq(struct task_struct *p, struct scx_dispatch_q *dsq);
-void scx_prepare_task_sched_change(struct task_struct *p);
 void scx_dispatch_dequeue(struct rq *rq, struct task_struct *p);
 void scx_do_enqueue_task(struct rq *rq, struct task_struct *p, u64 enq_flags,
 			 int sticky_cpu);

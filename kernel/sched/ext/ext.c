@@ -24,17 +24,6 @@
 
 DEFINE_RAW_SPINLOCK(scx_sched_lock);
 
-/*
- * Block a retained proxy donor, telling put_prev_task_scx() that the donor is
- * about to be dequeued and must not be reenqueued.
- */
-static void scx_block_proxy_donor(struct rq *rq, struct task_struct *p)
-{
-	rq->scx.flags |= SCX_RQ_PROXY_BLOCKING;
-	sched_proxy_block_task(rq, p);
-	rq->scx.flags &= ~SCX_RQ_PROXY_BLOCKING;
-}
-
 bool __scx_allow_proxy_exec(const struct task_struct *p)
 {
 	struct scx_sched *sch;
@@ -44,21 +33,6 @@ bool __scx_allow_proxy_exec(const struct task_struct *p)
 
 	sch = scx_task_sched(p);
 	return !sch || (sch->ops.flags & SCX_OPS_ENQ_BLOCKED);
-}
-
-/*
- * End retained proxy execution before changing @p's BPF scheduler ownership.
- * Called with @p's pi and rq locks held immediately before
- * sched_change_begin(). The caller must pass DEQUEUE_NOCLOCK so the rq clock
- * is updated only once.
- */
-void scx_prepare_task_sched_change(struct task_struct *p)
-{
-	lockdep_assert_held(&p->pi_lock);
-	lockdep_assert_rq_held(task_rq(p));
-
-	update_rq_clock(task_rq(p));
-	scx_block_proxy_donor(task_rq(p), p);
 }
 
 /*
@@ -3596,7 +3570,6 @@ static void put_prev_task_scx(struct rq *rq, struct task_struct *p,
 	struct scx_sched *sch = scx_task_sched(p);
 	bool proxy_put = p->is_blocked && next == rq->idle &&
 			 (rq->scx.flags & SCX_RQ_PROXY_PENDING);
-	bool proxy_block = rq->scx.flags & SCX_RQ_PROXY_BLOCKING;
 	bool rescue_keep = false;
 
 	rq->scx.flags &= ~SCX_RQ_PROXY_PENDING;
@@ -3624,15 +3597,12 @@ static void put_prev_task_scx(struct rq *rq, struct task_struct *p,
 	if (next != p && (p->scx.flags & SCX_TASK_QUEUED) &&
 	    (p->scx.flags & SCX_TASK_RUN_TRACKED)) {
 		if (SCX_HAS_OP(sch, stopping))
-			SCX_CALL_OP_TASK(sch, stopping, rq, p, !proxy_block);
+			SCX_CALL_OP_TASK(sch, stopping, rq, p, true);
 
 		p->scx.flags &= ~SCX_TASK_RUN_TRACKED;
 	}
 
 	if (p->scx.flags & SCX_TASK_QUEUED) {
-		if (proxy_block)
-			goto switch_class;
-
 		set_task_runnable(rq, p);
 
 		/*
@@ -8243,6 +8213,18 @@ int scx_validate_ops(struct scx_sched *sch, const struct sched_ext_ops *ops)
 
 	if ((ops->flags & SCX_OPS_ENQ_BLOCKED) && !ops->enqueue) {
 		scx_error(sch, "SCX_OPS_ENQ_BLOCKED requires ops.enqueue() to be implemented");
+		return -EINVAL;
+	}
+
+	/*
+	 * Proxy donor admission is a property of the whole hierarchy, so that
+	 * moving a task between schedulers never changes whether a retained
+	 * donor is admitted. Sub-scheds must follow the root scheduler.
+	 */
+	if (scx_parent(sch) &&
+	    (ops->flags & SCX_OPS_ENQ_BLOCKED) !=
+	    (sch->ancestors[0]->ops.flags & SCX_OPS_ENQ_BLOCKED)) {
+		scx_error(sch, "SCX_OPS_ENQ_BLOCKED must match the root scheduler");
 		return -EINVAL;
 	}
 
