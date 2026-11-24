@@ -624,8 +624,13 @@ static enum scx_test_status run_one(bool enq_blocked, bool cross_cpu,
 		goto out;
 	}
 
-	/* Scheduler ownership changes start from a fully blocked donor. */
+	/*
+	 * A scheduler that admits blocked donors inherits the retained donor,
+	 * otherwise it must have been fully blocked on the way in.
+	 */
 	donor_state = ENQ_BLOCKED_DONOR_SLEEPING;
+	if (enq_blocked)
+		donor_state |= ENQ_BLOCKED_DONOR_ON_RQ;
 	err = wait_for_donor_state(&thread_ctx, donor_state);
 	if (err < 0) {
 		SCX_ERR("Unexpected donor state after scheduler attachment (%d)",

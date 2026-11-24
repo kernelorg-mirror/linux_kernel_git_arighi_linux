@@ -2775,10 +2775,17 @@ struct sched_class {
 
 	/*
 	 * sched_change
+	 *
+	 * switching_to() is called with the rq lock held when @task enters
+	 * this class, before it is enqueued. It returns whether the class
+	 * accepts @task as a retained proxy donor, i.e., a mutex-blocked task
+	 * that is still on the runqueue. If it returns false and @task is such
+	 * a donor, sched_change_end() blocks @task instead of enqueueing it.
+	 * Classes without switching_to() accept retained donors.
 	 */
 	void (*switching_from)(struct rq *this_rq, struct task_struct *task);
 	void (*switched_from) (struct rq *this_rq, struct task_struct *task);
-	void (*switching_to)  (struct rq *this_rq, struct task_struct *task);
+	bool (*switching_to)  (struct rq *this_rq, struct task_struct *task);
 	void (*switched_to)   (struct rq *this_rq, struct task_struct *task);
 	u64  (*get_prio)     (struct rq *this_rq, struct task_struct *task);
 	void (*prio_changed) (struct rq *this_rq, struct task_struct *task,

@@ -2252,15 +2252,19 @@ void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
 	dequeue_task(rq, p, flags);
 }
 
+static inline bool task_state_contributes_to_load(unsigned long task_state)
+{
+	return (task_state & TASK_UNINTERRUPTIBLE) &&
+	       !(task_state & TASK_NOLOAD) &&
+	       !(task_state & TASK_FROZEN);
+}
+
 static bool dequeue_block_task(struct rq *rq, struct task_struct *p,
 			       unsigned long task_state)
 {
 	int flags = DEQUEUE_NOCLOCK;
 
-	p->sched_contributes_to_load =
-		(task_state & TASK_UNINTERRUPTIBLE) &&
-		!(task_state & TASK_NOLOAD) &&
-		!(task_state & TASK_FROZEN);
+	p->sched_contributes_to_load = task_state_contributes_to_load(task_state);
 
 	if (unlikely(is_special_task_state(task_state)))
 		flags |= DEQUEUE_SPECIAL;
@@ -3772,6 +3776,17 @@ void update_rq_avg_idle(struct rq *rq)
 	rq->idle_stamp = 0;
 }
 
+/*
+ * Make the execution context the donor again once the old donor has been put
+ * and rq->curr has been set as the next task.
+ */
+static inline void proxy_set_curr_donor(struct rq *rq)
+{
+	rq->next_class = rq->curr->sched_class;
+	rq_set_donor(rq, rq->curr);
+	resched_curr(rq);
+}
+
 #ifdef CONFIG_SCHED_PROXY_EXEC
 static void zap_balance_callbacks(struct rq *rq);
 
@@ -3780,10 +3795,8 @@ static inline void proxy_reset_donor(struct rq *rq)
 	WARN_ON_ONCE(rq->donor == rq->curr);
 
 	put_prev_set_next_task(rq, rq->donor, rq->curr);
-	rq->next_class = rq->curr->sched_class;
-	rq_set_donor(rq, rq->curr);
+	proxy_set_curr_donor(rq);
 	zap_balance_callbacks(rq);
-	resched_curr(rq);
 }
 
 /*
@@ -11200,6 +11213,58 @@ struct sched_change_ctx *sched_change_begin(struct task_struct *p, unsigned int 
 	return ctx;
 }
 
+/*
+ * Block a mutex-blocked task retained on the rq for proxy execution, because
+ * the class it is switching to does not accept blocked tasks.
+ *
+ * sched_change_begin() already dequeued @p from its old class and put it if
+ * it was the donor, so finish the job a sleeping dequeue would have done
+ * without going through a class again.
+ *
+ * The caller holds p->pi_lock, so @p cannot wake and migrate once
+ * __block_task() clears p->on_rq.
+ */
+static void sched_change_block_task(struct rq *rq, struct sched_change_ctx *ctx)
+{
+	struct task_struct *p = ctx->p;
+	unsigned long state = READ_ONCE(p->__state);
+
+	lockdep_assert_held(&p->pi_lock);
+
+	if (WARN_ON_ONCE(state == TASK_RUNNING))
+		return;
+
+	/*
+	 * Hand the donor role back to the execution context before clearing
+	 * p->on_rq. This is proxy_reset_donor() without put_prev_task(), which
+	 * sched_change_begin() already did, and without zapping the balance
+	 * callbacks: nothing redoes them here, and they include the pull that
+	 * switched_from_rt() or switched_from_dl() may have queued.
+	 *
+	 * If @p is rq->curr, __schedule() retained it and dropped the rq lock
+	 * while picking. Block it like any prev that blocks in __schedule():
+	 * keep it set, and let the pending pick put it.
+	 */
+	if (ctx->running && rq->curr != p) {
+		struct task_struct *curr = rq->curr;
+
+		__put_prev_set_next_dl_server(rq, p, curr);
+		curr->sched_class->set_next_task(rq, curr, SNT_PICK);
+		proxy_set_curr_donor(rq);
+		ctx->running = false;
+	}
+
+	p->sched_contributes_to_load = task_state_contributes_to_load(state);
+
+	/* The DEQUEUE_SAVE in sched_change_begin() skipped these. */
+	sched_info_dequeue(rq, p);
+	psi_dequeue(p, DEQUEUE_SLEEP);
+
+	__block_task(rq, p);
+
+	ctx->queued = false;
+}
+
 void sched_change_end(struct sched_change_ctx *ctx)
 {
 	struct task_struct *p = ctx->p;
@@ -11212,8 +11277,15 @@ void sched_change_end(struct sched_change_ctx *ctx)
 	 */
 	WARN_ON_ONCE(p->sched_class != ctx->class && !(ctx->flags & ENQUEUE_CLASS));
 
-	if ((ctx->flags & ENQUEUE_CLASS) && p->sched_class->switching_to)
-		p->sched_class->switching_to(rq, p);
+	if ((ctx->flags & ENQUEUE_CLASS) && p->sched_class->switching_to) {
+		/*
+		 * A class that refuses retained proxy donors gets @p blocked
+		 * instead of enqueued, see struct sched_class::switching_to.
+		 */
+		if (!p->sched_class->switching_to(rq, p) &&
+		    ctx->queued && p->is_blocked)
+			sched_change_block_task(rq, ctx);
+	}
 
 	if (ctx->queued)
 		enqueue_task(rq, p, ctx->flags);

@@ -4864,12 +4864,12 @@ static void prio_changed_scx(struct rq *rq, struct task_struct *p, u64 oldprio)
 {
 }
 
-static void switching_to_scx(struct rq *rq, struct task_struct *p)
+static bool switching_to_scx(struct rq *rq, struct task_struct *p)
 {
 	struct scx_sched *sch = scx_task_sched(p);
 
 	if (task_dead_and_done(p))
-		return;
+		return true;
 
 	scx_enable_task(sch, p);
 
@@ -4880,6 +4880,18 @@ static void switching_to_scx(struct rq *rq, struct task_struct *p)
 	 */
 	if (!scx_is_cid_type() && SCX_HAS_OP(sch, set_cpumask))
 		scx_call_op_set_cpumask(sch, rq, p, (struct cpumask *)p->cpus_ptr);
+
+	/*
+	 * Don't carry a donor retained by another class into sched_ext unless
+	 * the BPF scheduler admits blocked donors.
+	 *
+	 * If it does and @p is the current donor, @p keeps its running session:
+	 * like any running task entering sched_ext, the ENQUEUE_RESTORE in
+	 * sched_change_end() puts it straight into the local DSQ without
+	 * ops.enqueue(). It only carries %SCX_ENQ_BLOCKED once it goes through
+	 * ops.enqueue() while still blocked, e.g., when its slice runs out.
+	 */
+	return scx_allow_proxy_exec(p);
 }
 
 static void switched_from_scx(struct rq *rq, struct task_struct *p)
@@ -4919,20 +4931,6 @@ int scx_check_setscheduler(struct task_struct *p, int policy)
 		return -EACCES;
 
 	return 0;
-}
-
-/*
- * Don't carry a donor retained by another class into sched_ext. The caller
- * has updated the rq clock and invokes this immediately before
- * sched_change_begin() records the task's queued state.
- */
-void scx_prepare_setscheduler(struct task_struct *p, int policy)
-{
-	lockdep_assert_held(&p->pi_lock);
-	lockdep_assert_rq_held(task_rq(p));
-
-	if (scx_enabled() && p->policy != policy && policy == SCHED_EXT)
-		scx_block_proxy_donor(task_rq(p), p);
 }
 
 static void process_ddsp_deferred_locals(struct rq *rq)
@@ -8641,10 +8639,6 @@ static void scx_root_enable_workfn(struct kthread_work *work)
 
 		if (old_class != new_class)
 			queue_flags |= DEQUEUE_CLASS;
-		if (new_class == &ext_sched_class) {
-			scx_prepare_task_sched_change(p);
-			queue_flags |= DEQUEUE_NOCLOCK;
-		}
 
 		scoped_guard (sched_change, p, queue_flags) {
 			scx_set_task_slice(p, READ_ONCE(sch->slice_dfl));

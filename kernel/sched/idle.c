@@ -543,7 +543,7 @@ static void task_tick_idle(struct rq *rq, struct task_struct *curr, int queued)
 	update_curr_idle(rq);
 }
 
-static void switching_to_idle(struct rq *rq, struct task_struct *p)
+static bool switching_to_idle(struct rq *rq, struct task_struct *p)
 {
 	BUG();
 }
